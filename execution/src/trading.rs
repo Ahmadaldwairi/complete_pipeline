@@ -53,6 +53,82 @@ fn get_sol_price_cache() -> &'static RwLock<SolPriceCache> {
     })
 }
 
+// ============================================================================
+// Blockhash Warm-up Cache (Optimization #21 - Critical for hot path)
+// ============================================================================
+// Background task refreshes blockhash every 250-400ms to avoid fetching during trades
+// Removes 50-150ms latency from execution path
+use solana_sdk::hash::Hash;
+
+struct BlockhashCache {
+    hash: Hash,
+    cached_at: Instant,
+}
+
+static BLOCKHASH_CACHE: OnceLock<Arc<RwLock<BlockhashCache>>> = OnceLock::new();
+
+/// Get or initialize the blockhash cache
+fn get_blockhash_cache() -> &'static Arc<RwLock<BlockhashCache>> {
+    BLOCKHASH_CACHE.get_or_init(|| {
+        Arc::new(RwLock::new(BlockhashCache {
+            hash: Hash::default(), // Default hash (will be replaced by warm-up task)
+            cached_at: Instant::now(),
+        }))
+    })
+}
+
+/// Get cached blockhash (fast, no RPC call)
+pub async fn get_cached_blockhash() -> Hash {
+    let cache = get_blockhash_cache();
+    let cached = cache.read().await;
+    let age = cached.cached_at.elapsed();
+    
+    if age.as_millis() > 500 {
+        warn!("⚠️  Blockhash cache is stale (age: {:.0}ms) - warm-up task may be down", age.as_millis());
+    }
+    
+    cached.hash
+}
+
+/// Start background blockhash warm-up task
+/// Refreshes blockhash every 300ms to keep it hot
+pub fn start_blockhash_warmup_task(rpc_client: Arc<RpcClient>) {
+    tokio::spawn(async move {
+        info!("🔥 Blockhash warm-up task STARTED (refresh every 300ms)");
+        let mut refresh_count = 0u64;
+        
+        loop {
+            // Fetch fresh blockhash
+            match rpc_client.get_latest_blockhash() {
+                Ok(new_hash) => {
+                    refresh_count += 1;
+                    
+                    // Update cache
+                    let cache = get_blockhash_cache();
+                    {
+                        let mut cached = cache.write().await;
+                        let old_age = cached.cached_at.elapsed();
+                        cached.hash = new_hash;
+                        cached.cached_at = Instant::now();
+                        
+                        if refresh_count % 20 == 0 {
+                            debug!("🔄 Blockhash refreshed #{} (old age: {:.0}ms, new: {}...{})", 
+                                refresh_count, old_age.as_millis(), 
+                                &new_hash.to_string()[..8], &new_hash.to_string()[new_hash.to_string().len()-8..]);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Blockhash warm-up FAILED: {} (will retry in 300ms)", e);
+                }
+            }
+            
+            // Sleep 300ms before next refresh
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    });
+}
+
 /// Update SOL price cache from external source (e.g., copytrader bot broadcast)
 /// This allows avoiding API failures during critical trades
 pub async fn update_sol_price_cache(price: f64) {
@@ -64,105 +140,40 @@ pub async fn update_sol_price_cache(price: f64) {
     info!("✅ SOL price cache UPDATED from broadcast: ${:.2} (TTL: 30s)", price);
 }
 
-/// Fetch real SOL/USD price from Helius API (with caching)
-/// Helius is faster and more reliable than Jupiter for price data
+/// Get SOL/USD price from cache (populated by UDP broadcast from Brain)
+/// NO HTTP CALLS - executor is LIGHTWEIGHT and only uses UDP inputs!
 async fn fetch_sol_price() -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-    // Check cache first
     let cache = get_sol_price_cache();
-    {
-        let cached = cache.read().await;
+    let cached = cache.read().await;
+    
+    // Check if we have a valid cached price from UDP broadcast
+    if cached.price > 0.0 && cached.ttl.as_secs() > 0 {
         let age = cached.cached_at.elapsed();
         
-        // Only use cache if price is valid AND within TTL
-        // Note: First call has ttl=0 and price=0.0, so this will skip cache
-        if cached.price > 0.0 && cached.ttl.as_secs() > 0 && age < cached.ttl {
-            debug!("💰 SOL price cache HIT! ${:.2} (age: {:.2}s / TTL: {:.0}s)", 
+        if age < cached.ttl {
+            debug!("💰 SOL price from UDP cache: ${:.2} (age: {:.2}s / TTL: {:.0}s)", 
                 cached.price, age.as_secs_f64(), cached.ttl.as_secs_f64());
             return Ok(cached.price);
-        }
-        
-        // Log expiration only if we had a valid cached price
-        if cached.price > 0.0 && cached.ttl.as_secs() > 0 {
-            debug!("⏰ SOL price cache EXPIRED (age: {:.2}s > TTL: {:.0}s) - fetching fresh", 
+        } else {
+            // Cache expired - UDP broadcast should refresh it soon
+            warn!("⏰ SOL price cache STALE (age: {:.2}s > TTL: {:.0}s) - using last known price", 
                 age.as_secs_f64(), cached.ttl.as_secs_f64());
+            
+            // Return stale price rather than failing
+            // Brain UDP should refresh this every 30s
+            return Ok(cached.price);
         }
     }
     
-    // Cache miss or expired - fetch new price
-    debug!("🔄 Fetching fresh SOL/USD price from Helius...");
+    // No cache yet - UDP broadcasts not received
+    // This should only happen on first startup before Brain connects
+    warn!("⚠️  SOL price cache EMPTY - waiting for UDP broadcast from Brain");
+    warn!("   Using fallback price $150 (executor should NOT make HTTP calls!)");
     
-    // Try Helius first (faster, more reliable)
-    let price_result = async {
-        // Helius provides Jupiter price aggregation via their API
-        let response = reqwest::Client::new()
-            .get("https://api.helius.xyz/v0/token-metadata?api-key=dd6814ec-edbb-4a17-9d8d-cc0826aacf01")
-            .timeout(Duration::from_secs(3))
-            .query(&[("mint", "So11111111111111111111111111111111111111112")]) // SOL mint
-            .send()
-            .await
-            .map_err(|e| format!("Helius request failed: {}", e))?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|e| format!("Helius JSON parse failed: {}", e))?;
-        
-        // Extract price from response
-        let price = response[0]["price_info"]["price_per_token"]
-            .as_f64()
-            .ok_or("Helius price not found")?;
-        
-        Ok::<f64, Box<dyn std::error::Error + Send + Sync>>(price)
-    }.await;
-    
-    // Fallback to Jupiter if Helius fails
-    let price = match price_result {
-        Ok(p) => {
-            info!("✅ SOL price from Helius: ${:.2}", p);
-            p
-        }
-        Err(e) => {
-            warn!("⚠️  Helius price fetch failed: {} - trying Jupiter fallback", e);
-            
-            // Fallback to Jupiter API
-            let jup_result = reqwest::Client::new()
-                .get("https://price.jup.ag/v6/price?ids=SOL")
-                .timeout(Duration::from_secs(3))
-                .send()
-                .await
-                .map_err(|e| format!("Jupiter request failed: {}", e))?
-                .json::<serde_json::Value>()
-                .await
-                .map_err(|e| format!("Jupiter JSON parse failed: {}", e))?;
-            
-            let jup_price = jup_result["data"]["SOL"]["price"]
-                .as_f64()
-                .unwrap_or(150.0);
-            
-            info!("✅ SOL price from Jupiter fallback: ${:.2}", jup_price);
-            jup_price
-        }
-    };
-    
-    // Validate price is reasonable (between $50-$500)
-    let final_price = if price >= 50.0 && price <= 500.0 {
-        price
-    } else {
-        warn!("⚠️  Invalid SOL price: ${:.2} - using fallback $150", price);
-        150.0
-    };
-    
-    // Update cache with 30-second TTL (SOL price doesn't change much in 30s)
-    {
-        let mut cached = cache.write().await;
-        cached.price = final_price;
-        cached.cached_at = Instant::now();
-        cached.ttl = Duration::from_secs(30);
-        debug!("✅ SOL price cached: ${:.2} (TTL: {:.0}s)", final_price, cached.ttl.as_secs_f64());
-    }
-    
-    Ok(final_price)
+    Ok(150.0)
 }
 pub struct TradingEngine {
-    rpc_client: RpcClient,
+    rpc_client: Arc<RpcClient>,
     keypair: Keypair,
     jito_client: Option<JitoClient>,
     tpu_client: Option<FastTpuClient>,
@@ -176,7 +187,8 @@ pub struct BuyResult {
     pub token_address: String,
     pub signature: String,
     pub price: f64,                // Price in SOL per token (REAL from bonding curve)
-    pub token_amount: f64,         // Number of tokens bought
+    pub token_amount: f64,         // Number of tokens bought (EXPECTED from simulation)
+    pub actual_token_amount: Option<f64>,  // Actual tokens received (from tx parsing)
     pub position_size: f64,        // USD invested
     pub actual_position: u32,      // REAL position from blockchain
     pub estimated_position: u32,   // From mempool (for comparison)
@@ -184,6 +196,7 @@ pub struct BuyResult {
     pub entry_fees: FeeBreakdown,
     pub timestamp: DateTime<Local>,
     pub trace_id: Option<String>,  // For latency tracking
+    pub slippage_bps: Option<i32>, // Actual slippage in basis points
     
     // NEW: Timing data for latency tracking
     pub t_build: Option<std::time::Instant>,  // When tx was built
@@ -200,6 +213,8 @@ pub struct ExitResult {
     pub net_profit_sol: f64,       // After ALL fees (in SOL) - for wallet tracking
     pub tier: String,
     pub holding_time: u64,
+    pub actual_sol_received: Option<f64>,  // Actual SOL from tx parsing
+    pub slippage_bps: Option<i32>,  // Actual slippage in basis points
 }
 
 #[derive(Debug, Clone)]
@@ -220,10 +235,10 @@ pub struct FeeBreakdown {
 
 impl TradingEngine {
     pub async fn new(config: &Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let rpc_client = RpcClient::new_with_commitment(
+        let rpc_client = Arc::new(RpcClient::new_with_commitment(
             config.rpc_endpoint.clone(),
             CommitmentConfig::confirmed(),
-        );
+        ));
         
         // Load keypair from private key
         let keypair = load_keypair_from_string(&config.wallet_private_key)?;
@@ -269,6 +284,10 @@ impl TradingEngine {
         // OPTIMIZATION #12: Initialize bonding curve cache with 1000ms TTL
         // Increased to 1000ms to maintain cache hits across multiple monitoring loops
         let curve_cache = Arc::new(pump_bonding_curve::BondingCurveCache::new(1000));
+        
+        // OPTIMIZATION #21: Start blockhash warm-up task (refreshes every 300ms in background)
+        // This removes 50-150ms latency from the hot path by avoiding RPC calls during trades
+        start_blockhash_warmup_task(rpc_client.clone());
         
         Ok(TradingEngine {
             rpc_client,
@@ -456,7 +475,7 @@ impl TradingEngine {
         let entry_price = curve_state.calculate_price();
         info!("💰 Entry price: ${:.10} SOL per token", entry_price);
         
-        // Step 3: Get REAL SOL/USD price (cached from Helius)
+        // Step 3: Get REAL SOL/USD price (from UDP broadcast cache)
         let t_price_start = std::time::Instant::now();
         let sol_price = fetch_sol_price().await.unwrap_or(150.0);
         let price_time = t_price_start.elapsed().as_millis();
@@ -523,7 +542,7 @@ impl TradingEngine {
             ).await?;
             (sig, Some(tb), Some(ts))
         } else {
-            info!("⚡ Executing direct RPC transaction (via Helius)...");
+            info!("⚡ Executing direct RPC transaction (fallback)...");
             let sig = self.execute_direct_rpc_buy(
                 token_address, 
                 token_amount_raw,
@@ -582,7 +601,8 @@ impl TradingEngine {
             token_address: token_address.to_string(),
             signature,
             price: entry_price,      // ✅ REAL price from bonding curve!
-            token_amount,            // ✅ REAL token amount!
+            token_amount,            // ✅ REAL token amount (EXPECTED)!
+            actual_token_amount: None,  // Will be populated after tx confirmation
             position_size: position_size_usd,
             actual_position,
             estimated_position,
@@ -590,6 +610,7 @@ impl TradingEngine {
             entry_fees,
             timestamp: Local::now(),
             trace_id,                // ✅ For latency tracking!
+            slippage_bps: None,  // Will be calculated after tx confirmation
             t_build,                 // ✅ Build timestamp
             t_send,                  // ✅ Send timestamp
         })
@@ -690,9 +711,12 @@ impl TradingEngine {
             max_attempts, last_error.unwrap()).into())
     }
     
-    /// TIER 3: Fast resubmission with fresh blockhash + fee bump
+    /// TIER 3: Fast resubmission with fresh blockhash + fee bump (BLOCKING VERSION)
     /// Called when t4 landing not detected within timeout (120-180ms)
     /// Returns new signature if resubmitted successfully
+    /// 
+    /// ⚠️ WARNING: This method is async and will block the caller.
+    /// Use `spawn_resubmit_with_fee_bump()` for fire-and-forget non-blocking resubmit.
     pub async fn resubmit_with_fee_bump(
         &self,
         original_signature: &str,
@@ -707,8 +731,8 @@ impl TradingEngine {
         warn!("⚡ FAST RESUBMIT: {} not landed, rebuilding with fresh blockhash + fee bump",
             &original_signature[..12]);
         
-        // Get fresh blockhash (critical - old one may have expired)
-        let fresh_blockhash = self.get_recent_blockhash()?;
+        // Get fresh blockhash from warm-up cache (no RPC call!)
+        let fresh_blockhash = self.get_recent_blockhash().await?;
         
         // Temporarily boost priority fee
         let base_fee = self.get_dynamic_priority_fee();
@@ -738,6 +762,74 @@ impl TradingEngine {
                 Err(e)
             }
         }
+    }
+    
+    /// TIER 3: Non-blocking resubmission with fresh blockhash + fee bump
+    /// 
+    /// Fire-and-forget version that spawns resubmit in background task.
+    /// Does NOT block the hot execution path waiting for resubmit completion.
+    /// 
+    /// **Use this instead of `resubmit_with_fee_bump()` to avoid blocking!**
+    /// 
+    /// # Arguments
+    /// * `original_signature` - Signature of transaction that didn't land
+    /// * `token_address` - Token mint address
+    /// * `position_size_usd` - Position size in USD
+    /// * `estimated_position` - Estimated queue position
+    /// * `mempool_volume` - Current mempool volume
+    /// * `pending_buys` - Number of pending buys
+    /// * `trace_id` - Trace ID for correlation
+    /// * `fee_bump_multiplier` - Fee multiplier (e.g., 1.5 = 50% increase)
+    /// 
+    /// # Returns
+    /// JoinHandle that can be awaited optionally (or dropped for fire-and-forget)
+    /// 
+    /// # Example
+    /// ```rust
+    /// // Fire-and-forget (don't block hot path)
+    /// let _handle = trading_engine.clone().spawn_resubmit_with_fee_bump(
+    ///     signature.clone(),
+    ///     token_address.to_string(),
+    ///     position_size_usd,
+    ///     estimated_position,
+    ///     mempool_volume,
+    ///     pending_buys,
+    ///     trace_id.clone(),
+    ///     1.5, // 50% fee bump
+    /// );
+    /// // Continue with next trade immediately (resubmit runs in background)
+    /// 
+    /// // Or await if you need the result
+    /// let new_signature = handle.await??;
+    /// info!("Resubmitted with new signature: {}", new_signature);
+    /// ```
+    /// 
+    /// # Performance
+    /// - **Blocking version**: 100-200ms (blocks caller until resubmit completes)
+    /// - **Non-blocking version**: <1ms (spawns task and returns immediately)
+    pub fn spawn_resubmit_with_fee_bump(
+        self: Arc<Self>,
+        original_signature: String,
+        token_address: String,
+        position_size_usd: f64,
+        estimated_position: u32,
+        mempool_volume: f64,
+        pending_buys: u32,
+        trace_id: String,
+        fee_bump_multiplier: f64,
+    ) -> tokio::task::JoinHandle<Result<String, Box<dyn std::error::Error + Send + Sync>>> {
+        tokio::spawn(async move {
+            self.resubmit_with_fee_bump(
+                &original_signature,
+                &token_address,
+                position_size_usd,
+                estimated_position,
+                mempool_volume,
+                pending_buys,
+                trace_id,
+                fee_bump_multiplier,
+            ).await
+        })
     }
     
     /// Execute a SELL transaction via Jito bundle
@@ -837,7 +929,7 @@ impl TradingEngine {
                 cached_blockhash,
             ).await?
         } else {
-            info!("⚡ Executing direct RPC transaction (via Helius)...");
+            info!("⚡ Executing direct RPC transaction (fallback)...");
             self.execute_direct_rpc_sell(
                 token_address,
                 token_amount_raw,
@@ -900,6 +992,8 @@ impl TradingEngine {
             net_profit_sol,
             tier: tier.to_string(),
             holding_time,
+            actual_sol_received: None,  // Will be populated after tx confirmation
+            slippage_bps: None,  // Will be calculated after tx confirmation
         })
     }
     
@@ -1591,9 +1685,9 @@ impl TradingEngine {
         self.get_balance()
     }
     
-    /// Get recent blockhash (for blockhash warming optimization)
-    pub fn get_recent_blockhash(&self) -> Result<solana_sdk::hash::Hash, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(self.rpc_client.get_latest_blockhash()?)
+    /// Get recent blockhash (now uses warm-up cache instead of RPC call)
+    pub async fn get_recent_blockhash(&self) -> Result<solana_sdk::hash::Hash, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(get_cached_blockhash().await)
     }
     
     /// TIER 2: Get TPU client for leader schedule refresh
@@ -1637,6 +1731,20 @@ impl TradingEngine {
                             info!("✅ Transaction FINALIZED at slot {} (poll #{}, {:.2}s after detection) - trace: {}", 
                                 confirmed_slot, poll_count, t_confirm_ns as f64 / 1_000_000_000.0, &trace_id[..8]);
                             
+                            // Parse actual fees from transaction meta
+                            match self.get_actual_transaction_fee(&signature).await {
+                                Ok(actual_fee_sol) => {
+                                    info!("💰 Actual transaction fee: {:.6} SOL ({:.4} USD @ current price) - trace: {}", 
+                                        actual_fee_sol, actual_fee_sol * 150.0, &trace_id[..8]); // Assuming ~$150 SOL
+                                    
+                                    // TODO: Store actual_fee_sol in database for PnL tracking
+                                    // This is the REAL cost including base fee + priority fee + protocol fees
+                                }
+                                Err(e) => {
+                                    warn!("⚠️  Failed to fetch actual transaction fee: {} - using estimated fees", e);
+                                }
+                            }
+                            
                             // Update database with confirmation timing
                             if let Err(e) = db.update_trace_confirm(&trace_id, t_confirm_ns, confirmed_slot).await {
                                 error!("Failed to update trace confirmation: {}", e);
@@ -1662,6 +1770,128 @@ impl TradingEngine {
             }
             
             tokio::time::sleep(poll_interval).await;
+        }
+    }
+    
+    /// Fetch actual transaction fee from confirmed transaction meta
+    /// This gives us the REAL cost (base fee + priority fee + protocol fees)
+    /// Critical for accurate PnL tracking that matches wallet balances
+    pub async fn get_actual_transaction_fee(
+        &self,
+        signature: &Signature,
+    ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+        use solana_transaction_status::UiTransactionEncoding;
+        use solana_client::rpc_config::RpcTransactionConfig;
+        
+        // Fetch transaction with full meta
+        let config = RpcTransactionConfig {
+            encoding: Some(UiTransactionEncoding::Json),
+            commitment: Some(CommitmentConfig::finalized()),
+            max_supported_transaction_version: Some(0),
+        };
+        
+        let tx_result = self.rpc_client.get_transaction_with_config(signature, config)?;
+        
+        // Extract fee from meta
+        if let Some(meta) = tx_result.transaction.meta {
+            // Method 1: Direct fee field (most reliable)
+            let fee_lamports = meta.fee;
+            let fee_sol = fee_lamports as f64 / 1_000_000_000.0;
+            
+            // Optional: Verify against balance changes (sanity check)
+            if let (Some(pre_balances), Some(post_balances)) = (meta.pre_balances.first(), meta.post_balances.first()) {
+                let balance_change = (*pre_balances as i64 - *post_balances as i64) as f64 / 1_000_000_000.0;
+                let balance_fee = balance_change.abs();
+                
+                // Log if there's a significant discrepancy (> 0.001 SOL difference)
+                if (balance_fee - fee_sol).abs() > 0.001 {
+                    warn!("⚠️  Fee discrepancy: meta.fee={:.6} SOL vs balance_change={:.6} SOL (diff: {:.6})", 
+                        fee_sol, balance_fee, (balance_fee - fee_sol).abs());
+                }
+            }
+            
+            Ok(fee_sol)
+        } else {
+            Err("Transaction meta not available".into())
+        }
+    }
+    
+    /// Calculate and update slippage for a buy transaction
+    /// This should be called after transaction confirmation to parse actual amounts
+    pub async fn calculate_buy_slippage(
+        &self,
+        buy_result: &mut BuyResult,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::slippage;
+        use solana_sdk::signature::Signature;
+        use std::str::FromStr;
+        
+        let signature = Signature::from_str(&buy_result.signature)?;
+        
+        // Parse actual tokens received from transaction
+        match slippage::parse_actual_tokens_from_buy(&self.rpc_client, &signature).await {
+            Ok(actual_tokens) => {
+                let slippage_result = slippage::SlippageResult::new(
+                    buy_result.token_amount,
+                    actual_tokens,
+                );
+                
+                // Update buy result with actual data
+                buy_result.actual_token_amount = Some(actual_tokens);
+                buy_result.slippage_bps = Some(slippage_result.slippage_bps);
+                
+                // Log slippage analysis
+                slippage_result.log("BUY");
+                
+                Ok(())
+            }
+            Err(e) => {
+                warn!("⚠️  Failed to calculate buy slippage: {}", e);
+                warn!("   Transaction may still be processing or parsing failed");
+                Ok(()) // Non-critical error
+            }
+        }
+    }
+    
+    /// Calculate and update slippage for a sell transaction
+    /// This should be called after transaction confirmation to parse actual amounts
+    pub async fn calculate_sell_slippage(
+        &self,
+        exit_result: &mut ExitResult,
+        expected_sol: f64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::slippage;
+        use solana_sdk::signature::Signature;
+        use std::str::FromStr;
+        
+        let signature = Signature::from_str(&exit_result.signature)?;
+        
+        // Parse actual SOL received from transaction
+        match slippage::parse_actual_sol_from_sell(
+            &self.rpc_client,
+            &signature,
+            &self.keypair.pubkey(),
+        ).await {
+            Ok(actual_sol) => {
+                let slippage_result = slippage::SlippageResult::new(
+                    expected_sol,
+                    actual_sol,
+                );
+                
+                // Update exit result with actual data
+                exit_result.actual_sol_received = Some(actual_sol);
+                exit_result.slippage_bps = Some(slippage_result.slippage_bps);
+                
+                // Log slippage analysis
+                slippage_result.log("SELL");
+                
+                Ok(())
+            }
+            Err(e) => {
+                warn!("⚠️  Failed to calculate sell slippage: {}", e);
+                warn!("   Transaction may still be processing or parsing failed");
+                Ok(()) // Non-critical error
+            }
         }
     }
 }

@@ -89,6 +89,12 @@ async fn main() -> Result<()> {
     let window_aggregator = WindowAggregator::new(config.windows.intervals.clone());
     info!("📊 Window Aggregator: Intervals {:?}", config.windows.intervals);
 
+    // 🔮 Spawn Pyth SOL/USD Price Subscriber (runs in background)
+    let pyth_handle = data_mining::pyth_subscriber::spawn_pyth_subscriber(
+        config.grpc.endpoint.clone()
+    );
+    info!("🔮 Pyth subscriber spawned - broadcasting to ports 45100 & 45110");
+
     // Main processing loop with auto-reconnect
     loop {
         info!("🔌 Connecting to gRPC: {}", config.grpc.endpoint);

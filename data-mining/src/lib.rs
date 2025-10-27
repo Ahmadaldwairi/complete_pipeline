@@ -9,5 +9,6 @@ pub mod grpc;
 pub mod decoder;
 pub mod udp;
 pub mod checkpoint;
+pub mod pyth_subscriber;
 
 pub use db::Database;

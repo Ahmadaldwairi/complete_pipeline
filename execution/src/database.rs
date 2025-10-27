@@ -208,6 +208,48 @@ impl Database {
         
         info!("Database table 'my_trades' ready");
         
+        // Create executions table for clean PnL tracking
+        // This table tracks realized PnL with actual fees and slippage
+        client.execute(
+            "CREATE TABLE IF NOT EXISTS executions (
+                decision_id TEXT PRIMARY KEY,
+                mint TEXT NOT NULL,
+                open_sig TEXT NOT NULL,
+                close_sig TEXT,
+                entry_sol REAL NOT NULL,
+                exit_sol REAL,
+                fee_entry_sol REAL NOT NULL,
+                fee_exit_sol REAL,
+                entry_slip_pct REAL,
+                exit_slip_pct REAL,
+                net_pnl_sol REAL,
+                net_pnl_usd REAL,
+                tp_hit INTEGER DEFAULT 0,
+                sl_hit INTEGER DEFAULT 0,
+                ts_open BIGINT NOT NULL,
+                ts_close BIGINT,
+                status TEXT DEFAULT 'open' CHECK(status IN ('open', 'closed', 'failed')),
+                sol_price_usd REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )",
+            &[],
+        ).await?;
+        
+        // Create index on status for fast open position queries
+        client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status)",
+            &[],
+        ).await?;
+        
+        // Create index on mint for fast lookup by token
+        client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_executions_mint ON executions(mint)",
+            &[],
+        ).await?;
+        
+        info!("Database table 'executions' ready");
+        
         Ok(Database { client })
     }
     
@@ -339,10 +381,149 @@ impl Database {
                         return Err(Box::new(e));
                     }
                     
-                    // Small backoff before retry
+                                        // Small backoff before retry
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
         }
+    }
+    
+    // ============================================================================
+    // Executions Table Methods (Clean PnL Tracking)
+    // ============================================================================
+    
+    /// Record a new execution (entry)
+    pub async fn insert_execution(
+        &self,
+        decision_id: &str,
+        mint: &str,
+        open_sig: &str,
+        entry_sol: f64,
+        fee_entry_sol: f64,
+        entry_slip_pct: Option<f64>,
+        sol_price_usd: f64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let ts_open = chrono::Utc::now().timestamp();
+        
+        self.client.execute(
+            "INSERT INTO executions (
+                decision_id, mint, open_sig, entry_sol, fee_entry_sol, 
+                entry_slip_pct, ts_open, status, sol_price_usd
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)",
+            &[
+                &decision_id,
+                &mint,
+                &open_sig,
+                &(entry_sol as f32),
+                &(fee_entry_sol as f32),
+                &entry_slip_pct.map(|s| s as f32),
+                &ts_open,
+                &(sol_price_usd as f32),
+            ],
+        ).await?;
+        
+        debug!("📝 Execution recorded: {} (entry: {:.4} SOL, fee: {:.6} SOL)", 
+            &decision_id[..8], entry_sol, fee_entry_sol);
+        
+        Ok(())
+    }
+    
+    /// Update execution with exit data
+    pub async fn update_execution_exit(
+        &self,
+        decision_id: &str,
+        close_sig: &str,
+        exit_sol: f64,
+        fee_exit_sol: f64,
+        exit_slip_pct: Option<f64>,
+        tp_hit: bool,
+        sl_hit: bool,
+        sol_price_usd: f64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let ts_close = chrono::Utc::now().timestamp();
+        
+        // Fetch entry data to calculate PnL
+        let row = self.client.query_one(
+            "SELECT entry_sol, fee_entry_sol FROM executions WHERE decision_id = $1",
+            &[&decision_id],
+        ).await?;
+        
+        let entry_sol: f32 = row.get(0);
+        let fee_entry_sol: f32 = row.get(1);
+        
+        // Calculate net PnL
+        let gross_pnl_sol = exit_sol - entry_sol as f64;
+        let total_fees_sol = fee_entry_sol as f64 + fee_exit_sol;
+        let net_pnl_sol = gross_pnl_sol - total_fees_sol;
+        let net_pnl_usd = net_pnl_sol * sol_price_usd;
+        
+        self.client.execute(
+            "UPDATE executions SET 
+                close_sig = $1,
+                exit_sol = $2,
+                fee_exit_sol = $3,
+                exit_slip_pct = $4,
+                net_pnl_sol = $5,
+                net_pnl_usd = $6,
+                tp_hit = $7,
+                sl_hit = $8,
+                ts_close = $9,
+                status = 'closed',
+                updated_at = CURRENT_TIMESTAMP
+             WHERE decision_id = $10",
+            &[
+                &close_sig,
+                &(exit_sol as f32),
+                &(fee_exit_sol as f32),
+                &exit_slip_pct.map(|s| s as f32),
+                &(net_pnl_sol as f32),
+                &(net_pnl_usd as f32),
+                &(if tp_hit { 1 } else { 0 }),
+                &(if sl_hit { 1 } else { 0 }),
+                &ts_close,
+                &decision_id,
+            ],
+        ).await?;
+        
+        info!("💰 Execution closed: {} (PnL: {:.4} SOL / ${:.2} USD, TP: {}, SL: {})", 
+            &decision_id[..8], net_pnl_sol, net_pnl_usd, tp_hit, sl_hit);
+        
+        Ok(())
+    }
+    
+    /// Mark execution as failed
+    pub async fn mark_execution_failed(
+        &self,
+        decision_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.client.execute(
+            "UPDATE executions SET 
+                status = 'failed',
+                updated_at = CURRENT_TIMESTAMP
+             WHERE decision_id = $1",
+            &[&decision_id],
+        ).await?;
+        
+        info!("❌ Execution marked failed: {}", &decision_id[..8]);
+        
+        Ok(())
+    }
+    
+    /// Get total PnL stats from executions table
+    pub async fn get_pnl_stats(&self) -> Result<(f64, f64, i64), Box<dyn std::error::Error + Send + Sync>> {
+        let row = self.client.query_one(
+            "SELECT 
+                COALESCE(SUM(net_pnl_sol), 0) as total_pnl_sol,
+                COALESCE(SUM(net_pnl_usd), 0) as total_pnl_usd,
+                COUNT(*) FILTER (WHERE status = 'closed') as closed_count
+             FROM executions",
+            &[],
+        ).await?;
+        
+        let total_pnl_sol: f32 = row.get(0);
+        let total_pnl_usd: f32 = row.get(1);
+        let closed_count: i64 = row.get(2);
+        
+        Ok((total_pnl_sol as f64, total_pnl_usd as f64, closed_count))
     }
 }

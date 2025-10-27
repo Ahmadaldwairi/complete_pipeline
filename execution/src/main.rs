@@ -8,9 +8,12 @@ mod telegram;
 mod database;
 mod trading;
 mod advice_bus;
+mod mempool_bus;  // NEW: Mempool hot signals (port 45130)
 mod emoji;
 mod metrics;
 mod telemetry;
+mod slippage;  // NEW: Slippage calculation module
+mod performance_log;  // NEW: JSONL performance logging
 
 // Re-export unused modules to prevent warnings
 mod grpc_client;
@@ -189,9 +192,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 // TODO: Implement widen exit logic
                             }
                             
-                            advice_bus::Advisory::SolPriceUpdate { .. } => {
-                                // SOL price updates handled separately
-                                debug!("📥 RECEIVED SolPriceUpdate");
+                            advice_bus::Advisory::SolPriceUpdate { price_cents, timestamp_secs, source, .. } => {
+                                // Convert cents to dollars
+                                let price_usd = price_cents as f64 / 100.0;
+                                let source_name = match source {
+                                    1 => "Pyth",
+                                    2 => "Jupiter",
+                                    3 => "Fallback",
+                                    _ => "Unknown",
+                                };
+                                
+                                debug!("📊 RECEIVED SolPriceUpdate: ${:.2} from {} (ts: {})", 
+                                    price_usd, source_name, timestamp_secs);
+                                
+                                // Update the cache used by trading engine
+                                trading::update_sol_price_cache(price_usd).await;
                             }
                             
                             advice_bus::Advisory::EmergencyExit { mint, .. } => {
@@ -213,8 +228,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("");
     info!("🚀 EXECUTOR READY");
     info!("   Listening for TradeDecisions from Brain on port 45100");
+    info!("   Listening for Hot Signals from Mempool on port 45130");
     info!("   Sending telemetry back to Brain on port 45110");
     info!("");
+    
+    // Start Mempool Bus listener (receives Hot Signals for frontrunning)
+    let positions_mempool = active_positions.clone();
+    let trading_mempool = trading.clone();
+    let telegram_mempool = telegram.clone();
+    
+    tokio::spawn(async move {
+        match mempool_bus::MempoolBusListener::new(45130) {
+            Ok(listener) => {
+                info!("✅ Mempool Bus Listener: Active on port 45130 (waiting for hot signals)");
+                
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;  // 10ms poll (fast)
+                    
+                    if let Some(signal) = listener.try_recv() {
+                        info!("🔥 HOT SIGNAL: {} | urgency: {} | whale: {}...{} | SOL: {:.4} | action: {}", 
+                              &signal.mint[..12],
+                              signal.urgency,
+                              &signal.whale_wallet[..4],
+                              &signal.whale_wallet[signal.whale_wallet.len()-4..],
+                              signal.amount_sol,
+                              signal.action);
+                        
+                        // Priority check: High urgency signals (>= 80) get immediate attention
+                        if signal.urgency >= 80 {
+                            warn!("⚡ HIGH URGENCY SIGNAL ({}) - Priority execution recommended", signal.urgency);
+                            
+                            // Check if we already have a position
+                            if positions_mempool.read().await.contains_key(&signal.mint) {
+                                debug!("   Already have position in {}, skipping", &signal.mint[..12]);
+                                continue;
+                            }
+                            
+                            // TODO: Implement hot signal execution
+                            // This should:
+                            // 1. Validate signal freshness (timestamp < 100ms old)
+                            // 2. Execute BUY if action == "buy" and urgency >= threshold
+                            // 3. Use higher priority fees for urgency >= 90
+                            // 4. Skip normal Brain decision queue (direct execution)
+                            
+                            info!("   🎯 WOULD EXECUTE HOT SIGNAL: {} ({} SOL)", 
+                                  &signal.mint[..12], signal.amount_sol);
+                            info!("   [Hot signal execution to be implemented]");
+                            
+                            // Notify Telegram for high urgency
+                            telegram_mempool.send_message(&format!(
+                                "🔥 HOT SIGNAL DETECTED!\nToken: {}\nUrgency: {}/100\nWhale: {:.4} SOL\nAction: {}",
+                                &signal.mint[..12],
+                                signal.urgency,
+                                signal.amount_sol,
+                                signal.action
+                            )).await.ok();
+                        } else if signal.urgency >= 60 {
+                            info!("   💡 Medium urgency ({}), monitoring...", signal.urgency);
+                            // Medium urgency - track but don't execute immediately
+                        } else {
+                            debug!("   Low urgency ({}), ignoring", signal.urgency);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("❌ Failed to start Mempool Bus listener: {}", e);
+                error!("   Will not receive hot signals from mempool watcher!");
+                error!("   This reduces reaction speed to frontrunning opportunities.");
+            }
+        }
+    });
     
     // Main loop - just monitor positions
     loop {
