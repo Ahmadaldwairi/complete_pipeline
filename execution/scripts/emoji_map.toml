@@ -1,0 +1,50 @@
+# Emoji Map Configuration
+# Centralized emoji definitions for all bots (execution, launch collector, wallet tracker)
+# Last Updated: October 21, 2025
+
+[system]
+startup = "🚀"
+config = "⚙️"
+database = "💾"
+network = "📡"
+wallet = "👛"
+shutdown = "🛑"
+
+[trading]
+launch_detected = "👀"
+entry_signal = "🎯"
+position_entered = "💰"
+position_opened = "📈"
+exit_triggered = "🔴"
+exit_completed = "📉"
+strategy_matched = "📊"
+profit_recorded = "💸"
+loss_recorded = "💔"
+mempool_check = "🔍"
+volume_check = "📦"
+buyer_check = "👥"
+price_check = "💵"
+
+[advice_bus]
+listening = "👂"
+advisory_sent = "📤"
+advisory_received = "📥"
+hold_extended = "⏰"
+exit_widened = "🎨"
+urgent_exit = "🚨"
+advisory_rejected = "🔇"
+advisory_applied = "✅"
+
+[errors]
+warning = "⚠️"
+error = "❌"
+retry = "🔧"
+success = "✅"
+failed = "❗"
+timeout = "⏳"
+
+[monitoring]
+heartbeat = "💓"
+status = "📋"
+metrics = "📈"
+alert = "🔔"

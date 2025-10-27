@@ -1,0 +1,252 @@
+{
+  "dashboard": {
+    "title": "Brain Service Metrics",
+    "tags": ["brain", "trading", "solana"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Decision Rate (per minute)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(brain_decisions_total[1m]) * 60",
+            "legendFormat": "Total Decisions/min"
+          },
+          {
+            "expr": "rate(brain_decisions_approved[1m]) * 60",
+            "legendFormat": "Approved/min"
+          },
+          {
+            "expr": "rate(brain_decisions_rejected[1m]) * 60",
+            "legendFormat": "Rejected/min"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+      },
+      {
+        "id": 2,
+        "title": "Approval Rate",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "rate(brain_decisions_approved[5m]) / rate(brain_decisions_total[5m]) * 100",
+            "legendFormat": "Approval %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": 0, "color": "red" },
+                { "value": 50, "color": "yellow" },
+                { "value": 70, "color": "green" }
+              ]
+            }
+          }
+        },
+        "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 }
+      },
+      {
+        "id": 3,
+        "title": "Active Positions",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "brain_active_positions",
+            "legendFormat": "Positions"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": 0, "color": "green" },
+                { "value": 2, "color": "yellow" },
+                { "value": 3, "color": "red" }
+              ]
+            }
+          }
+        },
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 }
+      },
+      {
+        "id": 4,
+        "title": "SOL Price",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "brain_sol_price_usd",
+            "legendFormat": "SOL/USD"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "decimals": 2
+          }
+        },
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 4 }
+      },
+      {
+        "id": 5,
+        "title": "Decision Latency (P50, P95, P99)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(brain_decision_latency_seconds_bucket[5m]))",
+            "legendFormat": "P50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(brain_decision_latency_seconds_bucket[5m]))",
+            "legendFormat": "P95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(brain_decision_latency_seconds_bucket[5m]))",
+            "legendFormat": "P99"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+      },
+      {
+        "id": 6,
+        "title": "Cache Hit Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(brain_mint_cache_hits[5m]) / (rate(brain_mint_cache_hits[5m]) + rate(brain_mint_cache_misses[5m])) * 100",
+            "legendFormat": "Mint Cache"
+          },
+          {
+            "expr": "rate(brain_wallet_cache_hits[5m]) / (rate(brain_wallet_cache_hits[5m]) + rate(brain_wallet_cache_misses[5m])) * 100",
+            "legendFormat": "Wallet Cache"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+      },
+      {
+        "id": 7,
+        "title": "Rejection Reasons",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "brain_rejected_low_confidence",
+            "legendFormat": "Low Confidence"
+          },
+          {
+            "expr": "brain_rejected_guardrails",
+            "legendFormat": "Guardrails"
+          },
+          {
+            "expr": "brain_rejected_validation",
+            "legendFormat": "Validation"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 }
+      },
+      {
+        "id": 8,
+        "title": "Guardrail Blocks",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(brain_guardrail_loss_backoff[5m])",
+            "legendFormat": "Loss Backoff"
+          },
+          {
+            "expr": "rate(brain_guardrail_position_limit[5m])",
+            "legendFormat": "Position Limit"
+          },
+          {
+            "expr": "rate(brain_guardrail_rate_limit[5m])",
+            "legendFormat": "Rate Limit"
+          },
+          {
+            "expr": "rate(brain_guardrail_wallet_cooling[5m])",
+            "legendFormat": "Wallet Cooling"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 }
+      },
+      {
+        "id": 9,
+        "title": "Decision Pathways",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(brain_copytrade_decisions[1m])",
+            "legendFormat": "CopyTrade"
+          },
+          {
+            "expr": "rate(brain_newlaunch_decisions[1m])",
+            "legendFormat": "NewLaunch"
+          },
+          {
+            "expr": "rate(brain_wallet_activity_decisions[1m])",
+            "legendFormat": "WalletActivity"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 }
+      },
+      {
+        "id": 10,
+        "title": "UDP Traffic",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(brain_udp_packets_received[1m])",
+            "legendFormat": "Packets Received"
+          },
+          {
+            "expr": "rate(brain_udp_packets_sent[1m])",
+            "legendFormat": "Packets Sent"
+          },
+          {
+            "expr": "rate(brain_udp_parse_errors[1m])",
+            "legendFormat": "Parse Errors"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 }
+      },
+      {
+        "id": 11,
+        "title": "Database Performance",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(brain_db_query_duration_seconds_bucket[5m]))",
+            "legendFormat": "P95 Query Time"
+          },
+          {
+            "expr": "rate(brain_db_errors[5m])",
+            "legendFormat": "DB Errors/sec"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 }
+      }
+    ],
+    "refresh": "5s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    }
+  }
+}

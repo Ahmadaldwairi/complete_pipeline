@@ -1,0 +1,58 @@
+# Data Mining - Unified Collector Configuration
+
+[grpc]
+# Yellowstone gRPC endpoint (your local Agave + Yellowstone)
+endpoint = "http://127.0.0.1:10000"
+# Reconnect settings
+max_retries = 10
+retry_delay_secs = 5
+
+[programs]
+# Pump.fun bonding curve program
+pump_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+# SPL Token program
+spl_token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+# Raydium AMM V4 (optional, for migration tracking)
+raydium_amm_v4 = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+
+[database]
+# SQLite database path
+path = "./data/collector.db"
+# Batch size for transaction commits
+batch_size = 100
+# WAL mode for better concurrency
+wal_mode = true
+
+[checkpoint]
+# Checkpoint file to track last processed slot
+path = "./data/checkpoint.json"
+# Save checkpoint every N slots
+save_interval = 1000
+
+[windows]
+# Time windows to compute (in seconds)
+intervals = [10, 30, 60, 300]
+
+[monitoring]
+# Log level (trace, debug, info, warn, error)
+log_level = "info"
+# Enable JSON logging
+json_logs = false
+
+[rpc]
+# RPC endpoint for metadata fetching (fallback)
+endpoint = "http://127.0.0.1:8899"
+# Request timeout in seconds
+timeout_secs = 30
+
+[advice_bus]
+# Advice Bus - Send real-time advisories to execution bot via UDP
+enabled = true
+host = "127.0.0.1"
+port = 45100
+# Send ExtendHold if volume sustained for this many seconds
+sustained_volume_threshold_secs = 60
+# Minimum SOL volume to consider "sustained"
+sustained_volume_min_sol = 10.0
+# Confidence level for advisories (0-100)
+confidence = 80
