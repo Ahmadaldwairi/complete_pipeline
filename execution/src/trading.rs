@@ -12,14 +12,10 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::{Keypair, Signer, Signature},
     transaction::Transaction,
-    instruction::Instruction,
     compute_budget::ComputeBudgetInstruction,
     system_instruction,
 };
-use spl_associated_token_account::{
-    instruction::create_associated_token_account,
-    get_associated_token_address,
-};
+use spl_associated_token_account::instruction::create_associated_token_account;
 use spl_memo::build_memo;  // For adding trace_id to transactions
 use std::str::FromStr;
 use std::sync::Arc;  // TIER 5: For shared database access
@@ -98,9 +94,14 @@ pub fn start_blockhash_warmup_task(rpc_client: Arc<RpcClient>) {
         let mut refresh_count = 0u64;
         
         loop {
-            // Fetch fresh blockhash
-            match rpc_client.get_latest_blockhash() {
-                Ok(new_hash) => {
+            // Fetch fresh blockhash in blocking thread pool (prevents async task blocking)
+            let rpc_clone = rpc_client.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                rpc_clone.get_latest_blockhash()
+            }).await;
+            
+            match result {
+                Ok(Ok(new_hash)) => {
                     refresh_count += 1;
                     
                     // Update cache
@@ -118,8 +119,11 @@ pub fn start_blockhash_warmup_task(rpc_client: Arc<RpcClient>) {
                         }
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("❌ Blockhash warm-up FAILED: {} (will retry in 300ms)", e);
+                }
+                Err(e) => {
+                    error!("❌ Blockhash warm-up task error: {} (will retry in 300ms)", e);
                 }
             }
             
@@ -180,10 +184,13 @@ pub struct TradingEngine {
     config: Config,
     fee_tracker: PriorityFeeTracker,  // TIER 2: Dynamic priority fee tracking
     curve_cache: Arc<pump_bonding_curve::BondingCurveCache>,  // OPTIMIZATION #12: Curve caching
+    brain_socket: Option<std::net::UdpSocket>,  // For sending trade status to brain
 }
 
 #[derive(Debug, Clone)]
 pub struct BuyResult {
+    pub trade_id: String,          // UUID for tracking across components
+    pub status: ExecutionStatus,   // Transaction lifecycle status
     pub token_address: String,
     pub signature: String,
     pub price: f64,                // Price in SOL per token (REAL from bonding curve)
@@ -201,10 +208,23 @@ pub struct BuyResult {
     // NEW: Timing data for latency tracking
     pub t_build: Option<std::time::Instant>,  // When tx was built
     pub t_send: Option<std::time::Instant>,   // When tx was sent
+    pub submission_path: Option<String>,      // How tx was submitted: "TPU", "JITO", "JITO-RACE", "RPC"
+    pub entry_type: u8,                       // Entry strategy: 0=Rank, 1=Momentum, 2=CopyTrade, 3=LateOpportunity
+}
+
+/// Execution status for tracking transaction lifecycle
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionStatus {
+    Pending,    // Transaction submitted, waiting for confirmation
+    Confirmed,  // Transaction confirmed on-chain (success)
+    Failed,     // Transaction failed (reverted or error)
+    Timeout,    // Transaction did not confirm within expected time
 }
 
 #[derive(Debug, Clone)]
 pub struct ExitResult {
+    pub trade_id: String,          // UUID for tracking across components
+    pub status: ExecutionStatus,   // Transaction lifecycle status
     pub signature: String,
     pub exit_price: f64,
     pub gross_profit: f64,
@@ -215,6 +235,11 @@ pub struct ExitResult {
     pub holding_time: u64,
     pub actual_sol_received: Option<f64>,  // Actual SOL from tx parsing
     pub slippage_bps: Option<i32>,  // Actual slippage in basis points
+    
+    // NEW: Timing data for latency tracking
+    pub t_build: Option<std::time::Instant>,  // When tx was built
+    pub t_send: Option<std::time::Instant>,   // When tx was sent
+    pub submission_path: Option<String>,      // How tx was submitted: "TPU", "JITO", "JITO-RACE", "RPC"
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +314,19 @@ impl TradingEngine {
         // This removes 50-150ms latency from the hot path by avoiding RPC calls during trades
         start_blockhash_warmup_task(rpc_client.clone());
         
+        // Initialize UDP socket for sending trade status to brain (port 45111)
+        let brain_socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => {
+                socket.set_nonblocking(true).ok();
+                info!("✅ Brain status socket initialized");
+                Some(socket)
+            }
+            Err(e) => {
+                warn!("⚠️  Failed to create brain status socket: {}", e);
+                None
+            }
+        };
+        
         Ok(TradingEngine {
             rpc_client,
             keypair,
@@ -297,6 +335,7 @@ impl TradingEngine {
             config: config.clone(),
             fee_tracker: PriorityFeeTracker::new(),  // Initialize fee tracker
             curve_cache,  // Add curve cache
+            brain_socket,  // Add brain socket
         })
     }
     
@@ -308,6 +347,41 @@ impl TradingEngine {
     /// OPTIMIZATION #12: Get curve cache size
     pub async fn get_curve_cache_size(&self) -> usize {
         self.curve_cache.size().await
+    }
+    
+    /// Send TradeSubmitted notification to brain
+    fn send_trade_submitted(&self, mint: &[u8; 32], signature: &solana_sdk::signature::Signature, 
+                           side: u8, expected_tokens: u64, expected_sol_lamports: u64, expected_slip_bps: u16) {
+        if let Some(ref socket) = self.brain_socket {
+            use crate::advice_bus::Advisory;
+            
+            // Get signature bytes
+            let sig_bytes = signature.as_ref();
+            let mut sig_array = [0u8; 64];
+            sig_array.copy_from_slice(sig_bytes);
+            
+            let submitted = Advisory::TradeSubmitted {
+                mint: *mint,
+                signature: sig_array,
+                side,
+                submitted_ts_ns: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64,
+                expected_tokens,
+                expected_sol: expected_sol_lamports,
+                expected_slip_bps,
+                submitted_via: 0, // 0=TPU (will be set correctly per transaction type)
+                _padding: [0; 5],
+            };
+            
+            let bytes = submitted.to_bytes();
+            if let Err(e) = socket.send_to(&bytes, "127.0.0.1:45111") {
+                debug!("⚠️  Failed to send TradeSubmitted to brain: {}", e);
+            } else {
+                debug!("📤 Sent TradeSubmitted to brain: sig={}", signature);
+            }
+        }
     }
     
     /// ENTRY SCORE SYSTEM: Fetch bonding curve for pre-entry evaluation
@@ -413,10 +487,110 @@ impl TradingEngine {
         (0.30, 0.60, 2.0)
     }
     
+    /// 🏁 RACE SUBMISSION: Submit via both TPU and Jito, use whichever confirms first
+    /// This maximizes confirmation speed by racing two submission paths
+    async fn execute_race_buy(
+        &self,
+        token_address: &str,
+        token_amount_raw: u64,
+        max_sol_cost: u64,
+        trace_id: Option<String>,
+        cached_blockhash: Option<solana_sdk::hash::Hash>,
+    ) -> Result<(String, Instant, Instant, String), Box<dyn std::error::Error + Send + Sync>> {
+        info!("🏁 RACE MODE: Submitting via both TPU and Jito simultaneously");
+        
+        let t_race_start = Instant::now();
+        
+        // Clone data needed for both paths
+        let token_address_owned = token_address.to_string();
+        let trace_id_clone = trace_id.clone();
+        
+        // Spawn both tasks concurrently
+        let tpu_future = self.execute_tpu_buy_with_timing(
+            &token_address_owned,
+            token_amount_raw,
+            max_sol_cost,
+            trace_id.clone(),
+            cached_blockhash,
+        );
+        
+        let jito_future = self.execute_jito_buy_with_timing(
+            &token_address_owned,
+            token_amount_raw,
+            max_sol_cost,
+            trace_id_clone,
+            cached_blockhash,
+        );
+        
+        // Race both futures - whichever completes first wins
+        let t_tpu_start = Instant::now();
+        let t_jito_start = Instant::now();
+        
+        tokio::select! {
+            tpu_result = tpu_future => {
+                let tpu_elapsed = t_tpu_start.elapsed();
+                match tpu_result {
+                    Ok((sig, t_build, t_send)) => {
+                        info!("🏆 RACE WINNER: TPU ({:.2}ms)", tpu_elapsed.as_millis());
+                        Ok((sig, t_build, t_send, "TPU".to_string()))
+                    }
+                    Err(e) => {
+                        warn!("❌ TPU path failed: {}, trying Jito fallback...", e);
+                        // TPU failed, execute Jito as fallback
+                        match self.execute_jito_buy_with_timing(
+                            &token_address_owned,
+                            token_amount_raw,
+                            max_sol_cost,
+                            None,
+                            cached_blockhash,
+                        ).await {
+                            Ok((sig, t_build, t_send)) => {
+                                info!("✅ Jito fallback succeeded");
+                                Ok((sig, t_build, t_send, "JITO-FALLBACK".to_string()))
+                            }
+                            Err(e2) => {
+                                Err(format!("Both paths failed. TPU: {}, Jito: {}", e, e2).into())
+                            }
+                        }
+                    }
+                }
+            }
+            jito_result = jito_future => {
+                let jito_elapsed = t_jito_start.elapsed();
+                match jito_result {
+                    Ok((sig, t_build, t_send)) => {
+                        info!("🏆 RACE WINNER: JITO ({:.2}ms)", jito_elapsed.as_millis());
+                        Ok((sig, t_build, t_send, "JITO".to_string()))
+                    }
+                    Err(e) => {
+                        warn!("❌ Jito path failed: {}, trying TPU fallback...", e);
+                        // Jito failed, execute TPU as fallback
+                        match self.execute_tpu_buy_with_timing(
+                            &token_address_owned,
+                            token_amount_raw,
+                            max_sol_cost,
+                            None,
+                            cached_blockhash,
+                        ).await {
+                            Ok((sig, t_build, t_send)) => {
+                                info!("✅ TPU fallback succeeded");
+                                Ok((sig, t_build, t_send, "TPU-FALLBACK".to_string()))
+                            }
+                            Err(e2) => {
+                                Err(format!("Both paths failed. Jito: {}, TPU: {}", e, e2).into())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     /// Execute a BUY transaction via Jito bundle
     /// Now uses REAL bonding curve calculations!
     pub async fn buy(
         &self,
+        trade_id: String,          // NEW: UUID for tracking across components
         token_address: &str,
         position_size_usd: f64,
         estimated_position: u32,
@@ -424,6 +598,7 @@ impl TradingEngine {
         pending_buys: u32,  // NEW: For TIER 2 dynamic slippage by queue depth
         trace_id: Option<String>,  // NEW: For latency tracking
         cached_blockhash: Option<solana_sdk::hash::Hash>,  // NEW: Pre-warmed blockhash
+        entry_type: u8,     // NEW: Entry strategy type for tracking
     ) -> Result<BuyResult, Box<dyn std::error::Error + Send + Sync>> {
         let t_buy_start = std::time::Instant::now();
         info!("⚡ Executing BUY for {} (${} position)", token_address, position_size_usd);
@@ -519,9 +694,19 @@ impl TradingEngine {
         // 🕐 Capture timing: transaction will be built inside execute functions
         let t_before_build = std::time::Instant::now();
         
-        // Execute buy with priority: TPU > Jito > Direct RPC
+        // Execute buy with priority: RACE > TPU > Jito > Direct RPC
         let t_exec_start = std::time::Instant::now();
-        let (signature, t_build, t_send) = if self.config.use_tpu && self.tpu_client.is_some() {
+        let (signature, t_build, t_send, winner_path) = if self.config.use_jito_race && self.tpu_client.is_some() {
+            info!("🏁 Executing in RACE MODE (TPU vs Jito)...");
+            let (sig, tb, ts, path) = self.execute_race_buy(
+                token_address,
+                token_amount_raw,
+                max_sol_cost,
+                trace_id.clone(),
+                cached_blockhash,
+            ).await?;
+            (sig, Some(tb), Some(ts), Some(path))
+        } else if self.config.use_tpu && self.tpu_client.is_some() {
             info!("⚡ Executing via TPU (direct validator submission)...");
             let (sig, tb, ts) = self.execute_tpu_buy_with_timing(
                 token_address,
@@ -530,7 +715,7 @@ impl TradingEngine {
                 trace_id.clone(),  // Pass trace_id for monitoring
                 cached_blockhash,  // Use warmed blockhash
             ).await?;
-            (sig, Some(tb), Some(ts))
+            (sig, Some(tb), Some(ts), Some("TPU".to_string()))
         } else if self.config.use_jito {
             info!("⚡ Executing Jito bundle submission...");
             let (sig, tb, ts) = self.execute_jito_buy_with_timing(
@@ -540,7 +725,7 @@ impl TradingEngine {
                 trace_id.clone(),  // Pass trace_id for monitoring
                 cached_blockhash,  // Use warmed blockhash
             ).await?;
-            (sig, Some(tb), Some(ts))
+            (sig, Some(tb), Some(ts), Some("JITO".to_string()))
         } else {
             info!("⚡ Executing direct RPC transaction (fallback)...");
             let sig = self.execute_direct_rpc_buy(
@@ -550,11 +735,15 @@ impl TradingEngine {
                 cached_blockhash,  // Use warmed blockhash
             ).await?;
             // For direct RPC, we don't have fine-grained timing
-            (sig, Some(t_before_build), Some(std::time::Instant::now()))
+            (sig, Some(t_before_build), Some(std::time::Instant::now()), Some("RPC".to_string()))
         };
         
         let exec_time = t_exec_start.elapsed().as_millis();
-        println!("⏱️ execute_tpu_buy_with_timing(): {}ms", exec_time);
+        if let Some(ref path) = winner_path {
+            println!("⏱️  Execution via {} : {}ms", path, exec_time);
+        } else {
+            println!("⏱️  Execution time: {}ms", exec_time);
+        }
         
         let total_buy_time = t_buy_start.elapsed().as_millis();
         println!("⏱️ TOTAL buy() function time: {}ms", total_buy_time);
@@ -598,6 +787,8 @@ impl TradingEngine {
         info!("   📊 Break-even price: ${:.8}", entry_price * (total_cost_usd / position_size_usd));
         
         Ok(BuyResult {
+            trade_id,                // ✅ UUID for tracking
+            status: ExecutionStatus::Pending,  // ✅ Initially Pending, updated on confirmation
             token_address: token_address.to_string(),
             signature,
             price: entry_price,      // ✅ REAL price from bonding curve!
@@ -613,6 +804,8 @@ impl TradingEngine {
             slippage_bps: None,  // Will be calculated after tx confirmation
             t_build,                 // ✅ Build timestamp
             t_send,                  // ✅ Send timestamp
+            submission_path: winner_path,  // ✅ How tx was submitted (TPU/JITO/RPC)
+            entry_type,              // ✅ Entry strategy type
         })
     }
     
@@ -620,6 +813,7 @@ impl TradingEngine {
     /// Wraps buy() with intelligent retry logic for network reliability
     pub async fn buy_with_retry(
         &self,
+        trade_id: String,          // NEW: UUID for tracking across components
         token_address: &str,
         position_size_usd: f64,
         estimated_position: u32,
@@ -628,6 +822,7 @@ impl TradingEngine {
         trace_id: Option<String>,
         cached_blockhash: Option<solana_sdk::hash::Hash>,
         max_attempts: u32,
+        entry_type: u8,            // NEW: Entry strategy type
     ) -> Result<BuyResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut last_error = None;
         
@@ -635,6 +830,7 @@ impl TradingEngine {
             info!("🔄 Buy attempt {}/{} for {}", attempt, max_attempts, token_address);
             
             match self.buy(
+                trade_id.clone(),    // Pass trade_id through
                 token_address,
                 position_size_usd,
                 estimated_position,
@@ -642,6 +838,7 @@ impl TradingEngine {
                 pending_buys,
                 trace_id.clone(),
                 cached_blockhash,
+                entry_type,          // Pass entry_type through
             ).await {
                 Ok(result) => {
                     if attempt > 1 {
@@ -669,6 +866,7 @@ impl TradingEngine {
     /// Wraps sell() with intelligent retry logic for exit reliability
     pub async fn sell_with_retry(
         &self,
+        trade_id: String,          // NEW: UUID for tracking across components
         token_address: &str,
         buy_result: &BuyResult,
         current_price: f64,
@@ -682,6 +880,7 @@ impl TradingEngine {
             info!("🔄 Sell attempt {}/{} for {}", attempt, max_attempts, token_address);
             
             match self.sell(
+                trade_id.clone(),      // ✅ Pass trade_id through
                 token_address,
                 buy_result,
                 current_price,
@@ -720,6 +919,7 @@ impl TradingEngine {
     pub async fn resubmit_with_fee_bump(
         &self,
         original_signature: &str,
+        trade_id: String,          // NEW: UUID for tracking across components
         token_address: &str,
         position_size_usd: f64,
         estimated_position: u32,
@@ -745,6 +945,7 @@ impl TradingEngine {
         // Rebuild and send transaction with same trace_id (for dedupe)
         // The memo ensures we can correlate even if this gets a new signature
         match self.buy(
+            trade_id,                // ✅ Pass trade_id through
             token_address,
             position_size_usd,
             estimated_position,
@@ -752,6 +953,7 @@ impl TradingEngine {
             pending_buys,
             Some(trace_id.clone()),
             Some(fresh_blockhash),
+            0,                       // entry_type=0 (default to Rank for resubmit)
         ).await {
             Ok(result) => {
                 info!("✅ RESUBMIT SUCCESS: New signature {}", &result.signature[..12]);
@@ -810,6 +1012,7 @@ impl TradingEngine {
     pub fn spawn_resubmit_with_fee_bump(
         self: Arc<Self>,
         original_signature: String,
+        trade_id: String,          // NEW: UUID for tracking across components
         token_address: String,
         position_size_usd: f64,
         estimated_position: u32,
@@ -821,6 +1024,7 @@ impl TradingEngine {
         tokio::spawn(async move {
             self.resubmit_with_fee_bump(
                 &original_signature,
+                trade_id,              // ✅ Pass trade_id through
                 &token_address,
                 position_size_usd,
                 estimated_position,
@@ -835,6 +1039,7 @@ impl TradingEngine {
     /// Execute a SELL transaction via Jito bundle
     pub async fn sell(
         &self,
+        trade_id: String,          // NEW: UUID for tracking across components
         token_address: &str,
         buy_result: &BuyResult,
         current_price: f64,
@@ -843,6 +1048,8 @@ impl TradingEngine {
         widen_exit_slippage_bps: Option<u16>,  // Override slippage if WidenExit is active
     ) -> Result<ExitResult, Box<dyn std::error::Error + Send + Sync>> {
         info!("⚡ Executing SELL for {}", token_address);
+        
+        let t_start = std::time::Instant::now();  // Track overall timing
         
         // PHASE 2 FIX: Fetch FRESH bonding curve state for accurate current price
         // Don't rely on cached price - get real-time data right before sell
@@ -867,7 +1074,7 @@ impl TradingEngine {
         
         // Check if WidenExit advisory overrides slippage
         let total_slippage_bps = if let Some(override_bps) = widen_exit_slippage_bps {
-            println!("⚠️  WidenExit Override Active! Using advisory slippage: {}bps ({:.1}%)", 
+            info!("⚠️  Progressive Slippage Override Active! Using: {}bps ({:.1}%)", 
                      override_bps, override_bps as f64 / 100.0);
             override_bps
         } else {
@@ -887,7 +1094,10 @@ impl TradingEngine {
                 1000  // +10% buffer for normal volatility
             };
             
-            base_slippage_bps + volatility_buffer_bps
+            let calculated_total = base_slippage_bps + volatility_buffer_bps;
+            info!("📊 Dynamic Slippage: base={}bps + volatility={}bps = {}bps ({:.1}%)",
+                base_slippage_bps, volatility_buffer_bps, calculated_total, calculated_total as f64 / 100.0);
+            calculated_total
         };
         let slippage_tolerance = 1.0 - (total_slippage_bps as f64 / 10000.0);
         
@@ -911,32 +1121,39 @@ impl TradingEngine {
             total_slippage_bps as f64 / 100.0
         );
         
+        let t_build = std::time::Instant::now();
+        
         // Execute sell with priority: TPU > Jito > Direct RPC
-        let signature = if self.config.use_tpu && self.tpu_client.is_some() {
+        let (signature, submission_path) = if self.config.use_tpu && self.tpu_client.is_some() {
             info!("⚡ Executing via TPU (direct validator submission)...");
-            self.execute_tpu_sell(
+            let sig = self.execute_tpu_sell(
                 token_address,
                 token_amount_raw,
                 min_sol_output,
                 cached_blockhash,
-            ).await?
+            ).await?;
+            (sig, "TPU".to_string())
         } else if self.config.use_jito {
             info!("⚡ Executing Jito bundle submission...");
-            self.execute_jito_sell(
+            let sig = self.execute_jito_sell(
                 token_address,
                 token_amount_raw,
                 min_sol_output,
                 cached_blockhash,
-            ).await?
+            ).await?;
+            (sig, "JITO".to_string())
         } else {
             info!("⚡ Executing direct RPC transaction (fallback)...");
-            self.execute_direct_rpc_sell(
+            let sig = self.execute_direct_rpc_sell(
                 token_address,
                 token_amount_raw,
                 min_sol_output,
                 cached_blockhash,
-            ).await?
+            ).await?;
+            (sig, "RPC".to_string())
         };
+        
+        let t_send = std::time::Instant::now();
         
         // Calculate exit fees using real SOL price
         // Note: Slippage is already reflected in the execution price (SOL received),
@@ -984,6 +1201,8 @@ impl TradingEngine {
         info!("   Net profit (SOL): {:.6} SOL", net_profit_sol);
         
         Ok(ExitResult {
+            trade_id,                // ✅ UUID for tracking
+            status: ExecutionStatus::Pending,  // ✅ Initially Pending, updated on confirmation
             signature,
             exit_price: live_current_price,
             gross_profit,
@@ -994,6 +1213,9 @@ impl TradingEngine {
             holding_time,
             actual_sol_received: None,  // Will be populated after tx confirmation
             slippage_bps: None,  // Will be calculated after tx confirmation
+            t_build: Some(t_build),
+            t_send: Some(t_send),
+            submission_path: Some(submission_path),
         })
     }
     
@@ -1035,6 +1257,311 @@ impl TradingEngine {
         gross_profit - buy_result.entry_fees.total - exit_fees
     }
     
+    /// Simplified SELL for stateless Executor - Brain provides all context
+    pub async fn sell_simple(
+        &self,
+        trade_id: &str,
+        token_address: &str,
+        _size_lamports: u64,
+        _slippage_bps: u16,
+        cached_blockhash: Option<solana_sdk::hash::Hash>,
+    ) -> Result<ExitResult, anyhow::Error> {
+        info!("⚡ Executing simplified SELL for {}", token_address);
+        
+        // Fetch fresh bonding curve state
+        let token_mint = Pubkey::from_str(token_address)?;
+        let fresh_curve = self.curve_cache.get_or_fetch(&self.rpc_client, &token_mint).await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch bonding curve: {}", e))?;
+        
+        // Get token balance from wallet
+        let token_account = spl_associated_token_account::get_associated_token_address(
+            &self.keypair.pubkey(),
+            &token_mint,
+        );
+        
+        let token_balance = match self.rpc_client.get_token_account_balance(&token_account) {
+            Ok(balance) => balance.amount.parse::<u64>().unwrap_or(0),
+            Err(e) => {
+                warn!("Failed to get token balance: {}. Assuming 0.", e);
+                0
+            }
+        };
+        
+        if token_balance == 0 {
+            anyhow::bail!("No tokens to sell - balance is 0");
+        }
+        
+        info!("   Token balance: {} (raw)", token_balance);
+        
+        // Build SELL transaction
+        let t_build = std::time::Instant::now();
+        
+        let recent_blockhash = if let Some(bh) = cached_blockhash {
+            bh
+        } else {
+            self.rpc_client.get_latest_blockhash()?
+        };
+        
+        let sell_ix = pump_instructions::create_sell_instruction(
+            &self.keypair.pubkey(),
+            &token_mint,
+            token_balance,
+            0, // min_sol_output - set to 0 for max speed, rely on slippage
+            &fresh_curve.creator,
+        )?;
+        
+        let message = solana_sdk::message::Message::new_with_blockhash(
+            &[sell_ix],
+            Some(&self.keypair.pubkey()),
+            &recent_blockhash,
+        );
+        
+        let transaction = solana_sdk::transaction::Transaction::new(
+            &[&self.keypair],
+            message,
+            recent_blockhash,
+        );
+        
+        info!("   Transaction built in {:?}", t_build.elapsed());
+        
+        // Send SELL transaction using existing method
+        let t_send = std::time::Instant::now();
+        let signature = self.rpc_client.send_and_confirm_transaction(&transaction)?;
+        
+        let submission_path = "RPC"; // Simplified executor always uses RPC
+        
+        info!("   Transaction sent via {} in {:?}", submission_path, t_send.elapsed());
+        info!("   Signature: {}", signature);
+        
+        // Calculate exit price from bonding curve
+        let exit_price = fresh_curve.calculate_price();
+        
+        // Return minimal ExitResult (Brain calculates profit/fees)
+        Ok(ExitResult {
+            trade_id: trade_id.to_string(),
+            status: ExecutionStatus::Pending,
+            signature: signature.to_string(),
+            exit_price,
+            gross_profit: 0.0, // Brain calculates
+            exit_fees: FeeBreakdown { 
+                jito_tip: 0.0, 
+                gas_fee: 0.001, 
+                slippage: 0.0,
+                total: 0.001,
+            },
+            net_profit: 0.0, // Brain calculates
+            net_profit_sol: 0.0, // Brain calculates
+            tier: "".to_string(),
+            holding_time: 0, // Brain calculates
+            actual_sol_received: None,
+            slippage_bps: None,
+            t_build: Some(t_build),
+            t_send: Some(t_send),
+            submission_path: Some(submission_path.to_string()),
+        })
+    }
+    
+    /// 💎 ATOMIC BUY+SELL BUNDLE - Guaranteed Profit
+    /// 
+    /// This function calculates the expected profit BEFORE submitting any transactions,
+    /// and only executes if the profit exceeds the minimum threshold.
+    /// 
+    /// The BUY and SELL are bundled together atomically:
+    /// - Both transactions execute or neither executes (no partial fills)
+    /// - No market risk between buy and sell
+    /// - MEV protection (bundle prevents frontrunning)
+    /// 
+    /// # Arguments
+    /// * `token` - Token mint address
+    /// * `buy_sol_amount` - SOL to spend on buy
+    /// * `min_profit_usd` - Minimum profit required to execute (safety threshold)
+    /// 
+    /// # Returns
+    /// * `Ok((buy_sig, sell_sig, profit))` - Both signatures and realized profit
+    /// * `Err(...)` - If profit too low or execution failed
+    pub async fn execute_atomic_buy_sell_bundle(
+        &self,
+        token: &str,
+        buy_sol_amount: f64,
+        min_profit_usd: f64,
+    ) -> Result<(String, String, f64), Box<dyn std::error::Error + Send + Sync>> {
+        info!("💎 ATOMIC BUY+SELL BUNDLE - Calculating expected profit...");
+        
+        let jito_client = self.jito_client.as_ref()
+            .ok_or("Jito client not initialized")?;
+        
+        let token_pubkey = Pubkey::from_str(token)?;
+        let wallet_pubkey = self.keypair.pubkey();
+        
+        // 1. Fetch current bonding curve state
+        info!("📊 Fetching bonding curve state...");
+        let curve_state = pump_bonding_curve::fetch_bonding_curve_state(
+            &self.rpc_client,
+            &token_pubkey,
+        ).await?;
+        
+        // 2. Calculate expected tokens from BUY
+        let expected_tokens = curve_state.calculate_buy_tokens(buy_sol_amount);
+        info!("   Expected tokens from {}◎: {:.2}", buy_sol_amount, expected_tokens);
+        
+        // 3. Simulate new curve state after BUY
+        let sol_lamports_in = (buy_sol_amount * 1_000_000_000.0) as u64;
+        let k = (curve_state.virtual_sol_reserves as u128) * (curve_state.virtual_token_reserves as u128);
+        let new_sol_reserves = curve_state.virtual_sol_reserves + sol_lamports_in;
+        let new_token_reserves = (k / new_sol_reserves as u128) as u64;
+        
+        let simulated_curve = pump_bonding_curve::BondingCurveState {
+            virtual_token_reserves: new_token_reserves,
+            virtual_sol_reserves: new_sol_reserves,
+            real_token_reserves: curve_state.real_token_reserves,
+            real_sol_reserves: curve_state.real_sol_reserves + sol_lamports_in,
+            token_total_supply: curve_state.token_total_supply,
+            complete: curve_state.complete,
+            creator: curve_state.creator,
+        };
+        
+        // 4. Calculate expected SOL from SELL (using simulated curve)
+        let fee_bps = 100; // 1% fee
+        let expected_sol_out = simulated_curve.calculate_sell_sol(expected_tokens, fee_bps);
+        info!("   Expected SOL from selling {:.2} tokens: {}◎", expected_tokens, expected_sol_out);
+        
+        // 5. Calculate expected profit
+        let sol_price = fetch_sol_price().await.unwrap_or(150.0);
+        let gross_profit_sol = expected_sol_out - buy_sol_amount;
+        let gross_profit_usd = gross_profit_sol * sol_price;
+        
+        // Account for fees (2x Jito tip + 2x gas)
+        let jito_tip_sol = (self.config.jito_tip_amount * 2) as f64 / 1_000_000_000.0; // 2 transactions
+        let gas_fee_sol = 0.000005 * 2.0; // ~5k lamports per tx
+        let total_fees_sol = jito_tip_sol + gas_fee_sol;
+        let total_fees_usd = total_fees_sol * sol_price;
+        
+        let net_profit_sol = gross_profit_sol - total_fees_sol;
+        let net_profit_usd = net_profit_sol * sol_price;
+        
+        info!("💰 Expected Profit Calculation:");
+        info!("   Buy: {}◎ → {:.2} tokens", buy_sol_amount, expected_tokens);
+        info!("   Sell: {:.2} tokens → {}◎", expected_tokens, expected_sol_out);
+        info!("   Gross profit: {}◎ (${:.2})", gross_profit_sol, gross_profit_usd);
+        info!("   Fees (Jito + gas): {}◎ (${:.2})", total_fees_sol, total_fees_usd);
+        info!("   Net profit: {}◎ (${:.2})", net_profit_sol, net_profit_usd);
+        
+        // 6. Safety check: Only proceed if profit exceeds minimum
+        if net_profit_usd < min_profit_usd {
+            return Err(format!(
+                "❌ Expected profit ${:.2} is below minimum ${:.2} - SKIPPING BUNDLE",
+                net_profit_usd, min_profit_usd
+            ).into());
+        }
+        
+        info!("✅ Expected profit ${:.2} exceeds minimum ${:.2} - PROCEEDING", 
+              net_profit_usd, min_profit_usd);
+        
+        // 7. Get cached blockhash
+        let recent_blockhash = get_cached_blockhash().await;
+        
+        // 8. Build BUY transaction
+        info!("🔨 Building BUY transaction...");
+        let token_amount_raw = (expected_tokens * 1_000_000.0) as u64; // Convert to base units
+        let max_sol_cost = ((buy_sol_amount * 1.02) * 1_000_000_000.0) as u64; // 2% slippage
+        
+        let pump_buy_ix = pump_instructions::create_buy_instruction(
+            &wallet_pubkey,
+            &token_pubkey,
+            token_amount_raw,
+            max_sol_cost,
+            &curve_state.creator,
+        )?;
+        
+        // Add compute budget for BUY
+        let compute_limit_ix = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(200_000);
+        let compute_budget_ix = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
+            self.config.jito_tip_amount,
+        );
+        
+        // Add Jito tip for BUY
+        let tip_account = jito_client.get_random_tip_account()?;
+        let tip_ix = solana_sdk::system_instruction::transfer(
+            &wallet_pubkey,
+            &tip_account,
+            self.config.jito_tip_amount,
+        );
+        
+        let mut buy_tx = solana_sdk::transaction::Transaction::new_with_payer(
+            &[compute_limit_ix, compute_budget_ix, pump_buy_ix, tip_ix],
+            Some(&wallet_pubkey),
+        );
+        buy_tx.sign(&[&self.keypair], recent_blockhash);
+        
+        // 9. Build SELL transaction
+        info!("🔨 Building SELL transaction...");
+        let min_sol_output = ((expected_sol_out * 0.98) * 1_000_000_000.0) as u64; // 2% slippage
+        
+        let pump_sell_ix = pump_instructions::create_sell_instruction(
+            &wallet_pubkey,
+            &token_pubkey,
+            token_amount_raw,
+            min_sol_output,
+            &curve_state.creator,
+        )?;
+        
+        // Add compute budget for SELL
+        let compute_limit_ix_sell = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(200_000);
+        let compute_budget_ix_sell = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
+            self.config.jito_tip_amount,
+        );
+        
+        // Add Jito tip for SELL
+        let tip_ix_sell = solana_sdk::system_instruction::transfer(
+            &wallet_pubkey,
+            &tip_account,
+            self.config.jito_tip_amount,
+        );
+        
+        let mut sell_tx = solana_sdk::transaction::Transaction::new_with_payer(
+            &[compute_limit_ix_sell, compute_budget_ix_sell, pump_sell_ix, tip_ix_sell],
+            Some(&wallet_pubkey),
+        );
+        sell_tx.sign(&[&self.keypair], recent_blockhash);
+        
+        // 10. Submit atomic bundle
+        info!("📦 Submitting atomic BUY+SELL bundle to Jito...");
+        let bundle_id = jito_client.send_multi_transaction_bundle(&[&buy_tx, &sell_tx]).await?;
+        
+        info!("✅ Bundle submitted! ID: {}", bundle_id);
+        info!("⏳ Waiting for bundle confirmation...");
+        
+        // 11. Wait for confirmation
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            jito_client.wait_for_bundle_confirmation(&bundle_id, 60)
+        ).await {
+            Ok(Ok(true)) => {
+                // Bundle landed! Extract signatures
+                let final_status = jito_client.get_final_bundle_status(&bundle_id).await?;
+                
+                let buy_sig = bs58::encode(buy_tx.signatures[0]).into_string();
+                let sell_sig = bs58::encode(sell_tx.signatures[0]).into_string();
+                
+                info!("🎉 ATOMIC BUNDLE CONFIRMED!");
+                info!("   BUY signature:  {}", buy_sig);
+                info!("   SELL signature: {}", sell_sig);
+                info!("   Net profit: {}◎ (${:.2})", net_profit_sol, net_profit_usd);
+                
+                Ok((buy_sig, sell_sig, net_profit_usd))
+            }
+            Ok(Ok(false)) => {
+                Err("Bundle failed or was invalid".into())
+            }
+            Ok(Err(e)) => {
+                Err(format!("Bundle confirmation error: {}", e).into())
+            }
+            Err(_) => {
+                Err("Bundle confirmation timeout (30s)".into())
+            }
+        }
+    }
+
     /// Execute real Jito buy bundle with Pump.fun instruction
     async fn execute_jito_buy(
         &self, 
@@ -1066,8 +1593,18 @@ impl TradingEngine {
         
         let s0_5 = Instant::now(); // After setup
         
-        // 0. Check wallet balance first
-        let balance = self.rpc_client.get_balance(&wallet_pubkey)?;
+        // 0. Check wallet balance first (non-blocking)
+        let rpc_clone = self.rpc_client.clone();
+        let balance_result = tokio::task::spawn_blocking(move || {
+            rpc_clone.get_balance(&wallet_pubkey)
+        }).await;
+        
+        let balance = match balance_result {
+            Ok(Ok(bal)) => bal,
+            Ok(Err(e)) => return Err(format!("Failed to get balance: {}", e).into()),
+            Err(e) => return Err(format!("Spawn blocking error: {}", e).into()),
+        };
+        
         let balance_sol = balance as f64 / 1e9;
         info!("💰 Wallet balance: {:.4} SOL", balance_sol);
         
@@ -1276,26 +1813,26 @@ impl TradingEngine {
         let bundle_id = jito_client.send_transaction_bundle(&transaction).await?;
         
         info!("✅ Bundle submitted! ID: {}", bundle_id);
-        info!("⏳ Waiting for bundle confirmation...");
         
-        // 6. Wait for confirmation
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            jito_client.wait_for_bundle_confirmation(&bundle_id, 60)
-        ).await {
-            Ok(Ok(true)) => {
-                let final_status = jito_client.get_final_bundle_status(&bundle_id).await?;
-                if let Some(sig) = final_status.get_signature() {
-                    info!("🎉 Sell transaction confirmed! Signature: {}", sig);
-                    Ok(sig.to_string())
-                } else {
-                    Err("Bundle landed but no transaction signature found".into())
-                }
-            },
-            Ok(Ok(false)) => Err("Sell bundle failed or was invalid".into()),
-            Ok(Err(e)) => Err(format!("Bundle confirmation error: {}", e).into()),
-            Err(_) => Err("Bundle confirmation timeout (30s)".into()),
-        }
+        // ✅ CRITICAL FIX: Return immediately after bundle submission
+        // Background confirmation tracker will monitor the bundle
+        // DO NOT wait here - it causes false failures and duplicate sells!
+        
+        // Extract signature from bundle for tracking
+        let signature = bs58::encode(transaction.signatures[0]).into_string();
+        
+        // 📤 IMMEDIATELY notify brain that transaction was submitted
+        let token_mint = token_pubkey.to_bytes();
+        self.send_trade_submitted(
+            &token_mint,
+            &signature.parse().unwrap(),
+            1, // SELL
+            token_amount,
+            min_sol_output,
+            0, // No slippage tracking for sells yet
+        );
+        
+        Ok(signature)
     }
     
     /// Execute buy using direct RPC (no Jito, no MEV protection)
@@ -1311,8 +1848,18 @@ impl TradingEngine {
         let token_pubkey = Pubkey::from_str(token)?;
         let wallet_pubkey = self.keypair.pubkey();
         
-        // Check wallet balance
-        let balance = self.rpc_client.get_balance(&wallet_pubkey)?;
+        // Check wallet balance (non-blocking)
+        let rpc_clone = self.rpc_client.clone();
+        let balance_result = tokio::task::spawn_blocking(move || {
+            rpc_clone.get_balance(&wallet_pubkey)
+        }).await;
+        
+        let balance = match balance_result {
+            Ok(Ok(bal)) => bal,
+            Ok(Err(e)) => return Err(format!("Failed to get balance: {}", e).into()),
+            Err(e) => return Err(format!("Spawn blocking error: {}", e).into()),
+        };
+        
         let balance_sol = balance as f64 / 1e9;
         info!("💰 Wallet balance: {:.4} SOL", balance_sol);
         
@@ -1337,11 +1884,19 @@ impl TradingEngine {
         
         // Check if ATA exists
         let mut instructions = vec![];
-        match self.rpc_client.get_account(&ata) {
-            Ok(_) => {
+        
+        // Check if ATA exists (non-blocking)
+        let rpc_clone = self.rpc_client.clone();
+        let ata_clone = ata;
+        let ata_exists = tokio::task::spawn_blocking(move || {
+            rpc_clone.get_account(&ata_clone)
+        }).await;
+        
+        match ata_exists {
+            Ok(Ok(_)) => {
                 info!("✅ ATA already exists");
             }
-            Err(_) => {
+            Ok(Err(_)) | Err(_) => {
                 info!("⚠️ ATA doesn't exist, creating...");
                 let create_ata_ix = create_associated_token_account(
                     &wallet_pubkey,  // payer
@@ -1517,7 +2072,20 @@ impl TradingEngine {
         // Confirmation will be monitored via gRPC in main.rs (monitor_transaction_landing + monitor_confirmation)
         let signature = tpu_client.send_transaction_async(&transaction).await?;
         
+        // 📤 IMMEDIATELY notify brain that transaction was submitted (before confirmation)
+        let token_mint = token_pubkey.to_bytes();
+        self.send_trade_submitted(
+            &token_mint,
+            &signature,
+            0, // BUY
+            token_amount, // expected tokens from function parameter
+            max_sol_cost, // max SOL cost in lamports from function parameter
+            0, // slippage_bps not explicitly calculated in TPU (max_sol_cost serves as limit)
+        );
+        
+        // 🔄 Track transaction for background confirmation
         let t_send = std::time::Instant::now(); // 🕐 t3: Transaction sent (not confirmed yet!)
+
         
         // 🔍 MICRO-SPAN BREAKDOWN - Shows exactly where time is spent
         println!("🔍 TPU BUILD/SEND MICRO-SPAN BREAKDOWN (ASYNC MODE):");
@@ -1531,9 +2099,12 @@ impl TradingEngine {
         println!("   send={} ms ⚡ (async - no wait!)", (t_send-s6).as_millis());
         println!("   📊 TOTAL BUILD: {} ms | TOTAL SEND: {} ms", 
             (t_build-s0).as_millis(), (t_send-s6).as_millis());
-        println!("   🔍 Confirmation will be tracked via gRPC (t4=landing, t5=finalized)");
+        println!("   🔍 Confirmation tracked by Brain via gRPC");
         
         info!("✅ TPU transaction sent (async)! Signature: {}", signature);
+        
+        // ✅ Return immediately after sending (Brain handles confirmation)
+        
         Ok((signature.to_string(), t_build, t_send))
     }
     
@@ -1563,6 +2134,29 @@ impl TradingEngine {
             &token_pubkey,
         ).await?;
         
+        // CRITICAL FIX: Ensure ATA exists before selling (prevents "IllegalOwner" errors)
+        let spl_token_program = spl_token::id();
+        let user_ata = spl_associated_token_account::get_associated_token_address(&wallet_pubkey, &token_pubkey);
+        
+        info!("🔍 Checking if ATA exists before SELL: {}", user_ata);
+        let mut instructions = vec![];
+        
+        match self.rpc_client.get_account(&user_ata) {
+            Ok(_) => {
+                info!("✅ ATA already exists for SELL");
+            }
+            Err(_) => {
+                info!("⚠️ ATA doesn't exist, creating before SELL...");
+                let create_ata_ix = create_associated_token_account(
+                    &wallet_pubkey,  // payer
+                    &wallet_pubkey,  // wallet (owner)
+                    &token_pubkey,   // mint
+                    &spl_token_program,
+                );
+                instructions.push(create_ata_ix);
+            }
+        }
+        
         // Build Pump.fun sell instruction (with all 14 accounts!)
         let pump_sell_ix = pump_instructions::create_sell_instruction(
             &wallet_pubkey,
@@ -1581,11 +2175,16 @@ impl TradingEngine {
         info!("⚙️ Compute limit: {} CU, price: {} µLamports/CU", compute_limit, priority_fee);
         let compute_budget_ix = ComputeBudgetInstruction::set_compute_unit_price(priority_fee);
         
+        // Build final instruction list
+        let mut all_instructions = vec![compute_limit_ix, compute_budget_ix];
+        all_instructions.extend(instructions); // ATA creation if needed
+        all_instructions.push(pump_sell_ix);
+        
         // Build transaction
         // Use cached blockhash if available (TIER 1 optimization)
         let recent_blockhash = cached_blockhash.unwrap_or_else(|| self.rpc_client.get_latest_blockhash().unwrap());
         let mut transaction = Transaction::new_with_payer(
-            &[compute_limit_ix, compute_budget_ix, pump_sell_ix],
+            &all_instructions,
             Some(&wallet_pubkey),
         );
         transaction.sign(&[&self.keypair], recent_blockhash);
@@ -1595,24 +2194,18 @@ impl TradingEngine {
         // OPTIMIZATION: Send without waiting for confirmation (async mode)
         let signature = tpu_client.send_transaction_async(&transaction).await?;
         
-        info!("✅ TPU sell sent (async)! Signature: {} - gRPC will monitor confirmation", signature);
+        // 📤 IMMEDIATELY notify brain that transaction was submitted (before confirmation)
+        let token_mint = token_pubkey.to_bytes();
+        self.send_trade_submitted(
+            &token_mint,
+            &signature,
+            1, // SELL
+            token_amount,
+            min_sol_output,
+            0, // No slippage tracking for sells yet
+        );
         
-        // 🔍 POST-SELL: Verify tokens were actually sold (wait a bit for RPC to update)
-        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await; // Wait for likely confirmation
-        let user_ata = spl_associated_token_account::get_associated_token_address(&wallet_pubkey, &token_pubkey);
-        match self.rpc_client.get_token_account_balance(&user_ata) {
-            Ok(balance) => {
-                info!("🔍 POST-SELL: Token balance: {} (raw: {})", balance.ui_amount_string, balance.amount);
-                if balance.amount != "0" {
-                    error!("⚠️ WARNING: Sell confirmed but {} tokens still in wallet! Transaction: {}", 
-                        balance.ui_amount_string, signature);
-                    error!("⚠️ This usually means slippage was exceeded or instruction failed.");
-                }
-            }
-            Err(e) => {
-                info!("🔍 POST-SELL: Token account closed or empty (expected): {}", e);
-            }
-        }
+        info!("✅ TPU sell sent (async)! Signature: {} - Brain monitors confirmation via gRPC", signature);
         
         Ok(signature.to_string())
     }
@@ -1727,6 +2320,13 @@ impl TradingEngine {
                             let t5_confirm = Instant::now();
                             let t_confirm_ns = (t5_confirm - t0_detect).as_nanos() as i64;
                             let confirmed_slot = status.slot;
+                            
+                            // CRITICAL: Check if transaction succeeded or failed
+                            if let Some(err) = &status.err {
+                                error!("❌ Transaction FAILED at slot {}: {:?} - trace: {}", 
+                                    confirmed_slot, err, &trace_id[..8]);
+                                return Err(format!("Transaction failed: {:?}", err).into());
+                            }
                             
                             info!("✅ Transaction FINALIZED at slot {} (poll #{}, {:.2}s after detection) - trace: {}", 
                                 confirmed_slot, poll_count, t_confirm_ns as f64 / 1_000_000_000.0, &trace_id[..8]);

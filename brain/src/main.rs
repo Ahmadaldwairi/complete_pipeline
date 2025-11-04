@@ -16,9 +16,14 @@ mod udp_bus;
 mod feature_cache;
 mod decision_engine;
 mod metrics;
+mod position_lifecycle_logger;
+mod grpc_monitor;
+mod signature_tracker;
+mod telegram;
+mod bonding_curve;
 
 use anyhow::{Result, Context};
-use log::{info, warn, error};
+use log::{info, warn, error, debug};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -55,7 +60,10 @@ fn update_sol_price(price_usd: f32) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logger
+    // Load .env file FIRST (before logger init so RUST_LOG is available)
+    dotenv::dotenv().ok();
+    
+    // Initialize logger (now reads RUST_LOG from .env)
     env_logger::init();
     
     // Initialize metrics
@@ -71,8 +79,7 @@ async fn main() -> Result<()> {
     info!("✅ Metrics: Server started on port 9090");
     
     // Load configuration
-    dotenv::dotenv().ok();
-    let config = Arc::new(Config::from_env().context("Failed to load configuration")?);
+    let config = Arc::new(Config::from_env().context("Failed to load configuration")?);;
     info!("✅ Configuration: Loaded");
     
     // Print startup banner
@@ -116,9 +123,17 @@ async fn main() -> Result<()> {
     let wallet_cache = Arc::new(WalletCache::new(config.database.postgres_connection_string()));
     info!("✅ Caches: Initialized");
     
+    // Perform initial cache load immediately
+    let sqlite_conn_arc = Arc::new(tokio::sync::Mutex::new(sqlite_conn));
+    info!("📊 Performing initial mint cache load...");
+    if let Err(e) = update_mint_cache(&mint_cache, &sqlite_conn_arc).await {
+        warn!("⚠️  Initial mint cache load failed: {}", e);
+    } else {
+        info!("✅ Initial mint cache loaded ({} entries)", mint_cache.len());
+    }
+    
     // Start cache updater tasks
     let mint_cache_updater = mint_cache.clone();
-    let sqlite_conn_arc = Arc::new(tokio::sync::Mutex::new(sqlite_conn));
     let sqlite_for_mint = sqlite_conn_arc.clone();
     
     tokio::spawn(async move {
@@ -171,11 +186,44 @@ async fn main() -> Result<()> {
         min_decision_interval_ms: config.guardrails.rate_limit_ms,
         wallet_cooling_period_secs: config.guardrails.wallet_cooling_secs,
         tier_a_bypass_cooling: true, // Always allow Tier A bypass if profitable
+        creator_trade_limit_window_secs: 60, // 1 minute window
+        creator_trade_limit_count: 3, // Max 3 trades per creator per minute
     };
-    let mut guardrails = Guardrails::with_config(guardrail_config);
+    let mut guardrails = Guardrails::with_config(guardrail_config, "brain_guardrails.db".to_string());
     
     let logger = DecisionLogger::new(&config.logging.decision_log_path)
         .context("Failed to create decision logger")?;
+    
+    // Initialize position lifecycle logger
+    let lifecycle_logger = Arc::new(tokio::sync::Mutex::new(
+        position_lifecycle_logger::PositionLifecycleLogger::new()
+    ));
+    info!("✅ Position lifecycle logger: Ready");
+    
+    // Initialize Telegram client
+    let telegram_client = if let (Ok(token), Ok(chat_id)) = (
+        std::env::var("TELEGRAM_BOT_TOKEN"),
+        std::env::var("TELEGRAM_CHAT_ID")
+    ) {
+        let client = telegram::TelegramClient::new(token, chat_id);
+        info!("✅ Telegram: Initialized");
+        Some(Arc::new(client))
+    } else {
+        warn!("⚠️  Telegram: Not configured (TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing)");
+        None
+    };
+    
+    // Initialize signature tracker for confirmation tracking
+    let signature_tracker = Arc::new(tokio::sync::RwLock::new(
+        signature_tracker::SignatureTracker::new()
+    ));
+    info!("✅ Signature tracker: Ready");
+    
+    // Initialize gRPC monitor configuration
+    let grpc_config = grpc_monitor::GrpcConfig::from_env()
+        .context("Failed to load gRPC config")?;
+    info!("✅ gRPC config: Loaded (endpoint: {})", grpc_config.endpoint);
+    
     info!("✅ Decision engine: Ready");
     
     // Initialize position tracker
@@ -196,6 +244,9 @@ async fn main() -> Result<()> {
         max_position_pct: 5.0,
         risk_per_trade_pct: 2.0,
         scale_down_near_limit: true,
+        enable_adaptive_scaling: true,
+        adaptive_win_streak: 3,
+        adaptive_multiplier: 1.1,
     };
     let position_sizer = Arc::new(decision_engine::PositionSizer::new(sizer_config));
     info!("✅ Position sizer: Initialized");
@@ -217,10 +268,221 @@ async fn main() -> Result<()> {
     // Start receiving advice messages
     let mut advice_rx = advice_receiver.start().await;
     
+    // Spawn gRPC monitor task for real-time position monitoring
+    let grpc_position_tracker = position_tracker.clone();
+    let grpc_decision_sender = decision_sender.clone();
+    let grpc_lifecycle_logger = lifecycle_logger.clone();
+    let grpc_telegram = telegram_client.clone();
+    let grpc_tracker = signature_tracker.clone();
+    let grpc_mint_cache = mint_cache.clone();
+    
+    tokio::spawn(async move {
+        info!("🔗 Spawning gRPC monitor task...");
+        
+        // Get wallet and pump program pubkeys
+        let wallet_pubkey: Pubkey = std::env::var("WALLET_PUBKEY")
+            .expect("WALLET_PUBKEY not set")
+            .parse()
+            .expect("Invalid WALLET_PUBKEY");
+        
+        let pump_program_id: Pubkey = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+            .parse()
+            .expect("Invalid pump program ID");
+        
+        let monitor = grpc_monitor::GrpcMonitor::new(
+            grpc_config,
+            wallet_pubkey,
+            pump_program_id,
+        );
+        
+        // Subscribe to wallet for transaction confirmations
+        monitor.subscribe_wallet().await;
+        info!("✅ gRPC monitor: Subscribed to wallet");
+        
+        // Create bonding curve -> mint mapping
+        let bonding_curve_to_mint: Arc<tokio::sync::RwLock<std::collections::HashMap<Pubkey, [u8; 32]>>> = 
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        
+        let bc_map_for_handler = bonding_curve_to_mint.clone();
+        let handler_position_tracker = grpc_position_tracker.clone();
+        let handler_decision_sender = grpc_decision_sender.clone();
+        let handler_lifecycle_logger = grpc_lifecycle_logger.clone();
+        let handler_telegram = grpc_telegram.clone();
+        let handler_mint_cache = grpc_mint_cache.clone();
+        
+        // Define update handler
+        let handler = move |update: yellowstone_grpc_proto::geyser::subscribe_update::UpdateOneof| -> Result<()> {
+            use yellowstone_grpc_proto::geyser::subscribe_update::UpdateOneof;
+            
+            match update {
+                UpdateOneof::Account(account_update) => {
+                    if let Some(account) = account_update.account {
+                        if account.data.is_empty() {
+                            return Ok(());
+                        }
+                        
+                        // Parse account pubkey from the update
+                        let account_pubkey = if let Ok(pk) = Pubkey::try_from(account.pubkey.as_slice()) {
+                            pk
+                        } else {
+                            return Ok(());
+                        };
+                        
+                        if let Ok(curve_state) = bonding_curve::BondingCurveState::from_account_data(&account.data) {
+                            let new_price = curve_state.calculate_price();
+                            let mc_sol = curve_state.calculate_market_cap_sol();
+                            
+                            // Look up which mint this bonding curve belongs to
+                            let bc_map = bc_map_for_handler.blocking_read();
+                            if let Some(mint_bytes) = bc_map.get(&account_pubkey) {
+                                let mint_str = bs58::encode(mint_bytes).into_string();
+                                
+                                debug!("📊 Bonding curve update: {} | price: {:.10} SOL | MC: {:.2} SOL",
+                                    &mint_str[..12], new_price, mc_sol);
+                                
+                                // Check if we have an active position for this mint
+                                let tracker = handler_position_tracker.blocking_read();
+                                let position_opt = tracker.get_all().iter().find(|p| p.mint == mint_str).copied();
+                                
+                                if let Some(position) = position_opt {
+                                    let old_price = position.entry_price_sol;
+                                    let hold_duration = position.entry_time.elapsed().as_secs();
+                                    
+                                    // Log price update if significant change (>1%)
+                                    if (new_price - old_price).abs() / old_price > 0.01 {
+                                        let logger = handler_lifecycle_logger.clone();
+                                        let mint_clone = mint_str.clone();
+                                        tokio::spawn(async move {
+                                            logger.lock().await.log_event(
+                                                position_lifecycle_logger::LifecycleEvent::PriceUpdate {
+                                                    mint: mint_clone,
+                                                    old_price_sol: old_price,
+                                                    new_price_sol: new_price,
+                                                    mc_sol,
+                                                    update_source: "grpc_bonding_curve".to_string(),
+                                                    hold_duration_secs: hold_duration,
+                                                }
+                                            );
+                                        });
+                                    }
+                                    
+                                    // Update mint cache with fresh price
+                                    let mint_pk = Pubkey::new_from_array(*mint_bytes);
+                                    if let Some(mut features) = handler_mint_cache.get(&mint_pk) {
+                                        features.current_price = new_price;
+                                        features.mc_sol = mc_sol;
+                                        features.last_update = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs();
+                                        handler_mint_cache.insert(mint_pk, features.clone());
+                                        
+                                        // Check exit conditions with fresh price
+                                        let sol_price = get_sol_price_usd();
+                                        if let Some((reason, pos)) = tracker.check_position(&mint_str, &features, sol_price) {
+                                            // Clone position data before dropping lock
+                                            let pos_clone = pos.clone();
+                                            let reason_clone = reason.clone();
+                                            drop(tracker); // Release read lock before sending decision
+                                            
+                                            info!("🚨 gRPC EXIT SIGNAL: {} | reason: {} | price: {:.10} SOL",
+                                                &mint_str[..12], reason_clone.to_string(), new_price);
+                                            
+                                            let exit_percent = match &reason_clone {
+                                                decision_engine::ExitReason::ProfitTarget { exit_percent, .. } => *exit_percent,
+                                                decision_engine::ExitReason::StopLoss { exit_percent, .. } => *exit_percent,
+                                                decision_engine::ExitReason::TimeDecay { exit_percent, .. } => *exit_percent,
+                                                decision_engine::ExitReason::VolumeDrop { exit_percent, .. } => *exit_percent,
+                                                decision_engine::ExitReason::Emergency { exit_percent, .. } => *exit_percent,
+                                                decision_engine::ExitReason::NoMempoolActivity { exit_percent, .. } => *exit_percent,
+                                            };
+                                            
+                                            let exit_size_sol = pos_clone.size_sol * (exit_percent as f64 / 100.0);
+                                            let exit_size_lamports = (exit_size_sol * 1e9) as u64;
+                                            
+                                            // Log exit condition triggered
+                                            let logger = handler_lifecycle_logger.clone();
+                                            let mint_clone = mint_str.clone();
+                                            let reason_str = reason_clone.to_string();
+                                            let current_price = new_price;
+                                            let entry_price = pos_clone.entry_price_sol;
+                                            let pnl_percent = ((current_price - entry_price) / entry_price) * 100.0;
+                                            tokio::spawn(async move {
+                                                logger.lock().await.log_event(
+                                                    position_lifecycle_logger::LifecycleEvent::ExitConditionTriggered {
+                                                        mint: mint_clone,
+                                                        reason: reason_str,
+                                                        exit_percent,
+                                                        current_price_sol: current_price,
+                                                        entry_price_sol: entry_price,
+                                                        pnl_percent,
+                                                        hold_duration_secs: hold_duration,
+                                                    }
+                                                );
+                                            });
+                                            
+                                            // Send Telegram notification
+                                            if let Some(tg) = handler_telegram.as_ref() {
+                                                let mint_short = mint_str[..12].to_string();
+                                                let reason_str = reason_clone.to_string();
+                                                let tg_clone = tg.clone();
+                                                tokio::spawn(async move {
+                                                    let msg = format!(
+                                                        "🚨 EXIT SIGNAL\n\nMint: {}\nReason: {}\nPrice: {:.10} SOL\nP&L: {:.2}%\nExit: {}%",
+                                                        mint_short, reason_str, current_price, pnl_percent, exit_percent
+                                                    );
+                                                    let _ = tg_clone.send_message(&msg).await;
+                                                });
+                                            }
+                                            
+                                            // Create and send SELL decision
+                                            let sell_decision = crate::udp_bus::TradeDecision::new_sell(
+                                                *mint_bytes,
+                                                exit_size_lamports,
+                                                300, // 3% slippage for exits
+                                                pos_clone.entry_confidence,
+                                                0, // retry_count
+                                                0, // entry_type
+                                            );
+                                            
+                                            let sender = handler_decision_sender.clone();
+                                            tokio::spawn(async move {
+                                                if let Err(e) = sender.send_decision(&sell_decision).await {
+                                                    warn!("❌ Failed to send gRPC SELL decision: {}", e);
+                                                } else {
+                                                    info!("✅ gRPC SELL DECISION SENT: {:.3} SOL ({}%)",
+                                                        exit_size_sol, exit_percent);
+                                                    metrics::record_decision_sent();
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                UpdateOneof::Slot(slot_update) => {
+                    debug!("🎰 Slot update: {}", slot_update.slot);
+                }
+                _ => {}
+            }
+            
+            Ok(())
+        };
+        
+        // Start monitoring (reconnects automatically on errors)
+        if let Err(e) = monitor.start(handler).await {
+            error!("❌ gRPC monitor fatal error: {}", e);
+        }
+    });
+    
     // Spawn position monitoring task
     let position_tracker_monitor = position_tracker.clone();
     let mint_cache_monitor = mint_cache.clone();
     let decision_sender_monitor = decision_sender.clone();
+    let lifecycle_logger_monitor = lifecycle_logger.clone();
+    let telegram_client_monitor = telegram_client.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
         loop {
@@ -242,6 +504,28 @@ async fn main() -> Result<()> {
                         if let Some(features) = mint_cache_monitor.get(&mint_pk) {
                             let sol_price = 150.0; // TODO: Get real SOL price
                             
+                            // Log price update
+                            let old_price = pos.entry_price_sol;
+                            let new_price = features.current_price;
+                            let hold_duration = pos.entry_time.elapsed().as_secs();
+                            
+                            if (new_price - old_price).abs() / old_price > 0.01 { // Log >1% price changes
+                                let lifecycle_logger_price = lifecycle_logger_monitor.clone();
+                                let mint_clone = pos.mint.clone();
+                                tokio::spawn(async move {
+                                    lifecycle_logger_price.lock().await.log_event(
+                                        position_lifecycle_logger::LifecycleEvent::PriceUpdate {
+                                            mint: mint_clone,
+                                            old_price_sol: old_price,
+                                            new_price_sol: new_price,
+                                            mc_sol: new_price * 1_000_000_000.0, // Rough estimate
+                                            update_source: "mint_cache".to_string(),
+                                            hold_duration_secs: hold_duration,
+                                        }
+                                    );
+                                });
+                            }
+                            
                             // Check if position should exit
                             if let Some((reason, position)) = tracker.check_position(&pos.mint, &features, sol_price) {
                                 info!("🚨 EXIT SIGNAL: {} | reason: {}", &pos.mint[..8], reason.to_string());
@@ -253,10 +537,48 @@ async fn main() -> Result<()> {
                                     decision_engine::ExitReason::TimeDecay { exit_percent, .. } => *exit_percent,
                                     decision_engine::ExitReason::VolumeDrop { exit_percent, .. } => *exit_percent,
                                     decision_engine::ExitReason::Emergency { exit_percent, .. } => *exit_percent,
+                                    decision_engine::ExitReason::NoMempoolActivity { exit_percent, .. } => *exit_percent,
                                 };
+                                
+                                let current_price = features.current_price;
+                                let entry_price = position.entry_price_sol;
+                                let pnl_percent = ((current_price - entry_price) / entry_price) * 100.0;
+                                
+                                // Log exit condition triggered
+                                let lifecycle_logger_exit = lifecycle_logger_monitor.clone();
+                                let mint_exit = pos.mint.clone();
+                                let reason_str = reason.to_string();
+                                tokio::spawn(async move {
+                                    lifecycle_logger_exit.lock().await.log_event(
+                                        position_lifecycle_logger::LifecycleEvent::ExitConditionTriggered {
+                                            mint: mint_exit,
+                                            reason: reason_str,
+                                            exit_percent,
+                                            current_price_sol: current_price,
+                                            entry_price_sol: entry_price,
+                                            pnl_percent,
+                                            hold_duration_secs: hold_duration,
+                                        }
+                                    );
+                                });
                                 
                                 let exit_size_sol = position.size_sol * (exit_percent as f64 / 100.0);
                                 let exit_size_lamports = (exit_size_sol * 1e9) as u64;
+                                
+                                // Log SELL decision
+                                let lifecycle_logger_sell = lifecycle_logger_monitor.clone();
+                                let mint_sell = pos.mint.clone();
+                                let reason_sell = reason.to_string();
+                                tokio::spawn(async move {
+                                    lifecycle_logger_sell.lock().await.log_event(
+                                        position_lifecycle_logger::LifecycleEvent::SellDecision {
+                                            mint: mint_sell,
+                                            size_sol: exit_size_sol,
+                                            exit_percent,
+                                            reason: reason_sell,
+                                        }
+                                    );
+                                });
                                 
                                 // Create SELL decision
                                 let sell_decision = crate::udp_bus::TradeDecision::new_sell(
@@ -264,6 +586,8 @@ async fn main() -> Result<()> {
                                     exit_size_lamports,
                                     300, // 3% slippage for exits (wider)
                                     position.entry_confidence,
+                                    0, // retry_count (first attempt)
+                                    0, // entry_type (0 = rank-based, will be from position in future)
                                 );
                                 
                                 // Send to executor
@@ -273,6 +597,39 @@ async fn main() -> Result<()> {
                                     info!("✅ SELL DECISION SENT: {} ({:.3} SOL, {}%)", 
                                           &pos.mint[..8], exit_size_sol, exit_percent);
                                     metrics::record_decision_sent();
+                                    
+                                    // Send Telegram notification for SELL
+                                    if let Some(tg) = telegram_client_monitor.as_ref() {
+                                        let mint_short = pos.mint[..12].to_string();
+                                        let reason_str = reason.to_string();
+                                        let tg_clone = tg.clone();
+                                        tokio::spawn(async move {
+                                            let msg = format!(
+                                                "🔴 SELL DECISION\n\nMint: {}\nReason: {}\nSize: {:.4} SOL\nPrice: {:.10} SOL\nP&L: {:.2}%\nExit: {}%",
+                                                mint_short,
+                                                reason_str,
+                                                exit_size_sol,
+                                                current_price,
+                                                pnl_percent,
+                                                exit_percent
+                                            );
+                                            if let Err(e) = tg_clone.send_message(&msg).await {
+                                                warn!("Failed to send Telegram notification: {}", e);
+                                            }
+                                        });
+                                    }
+                                    
+                                    // Log SELL TX sent
+                                    let lifecycle_logger_tx = lifecycle_logger_monitor.clone();
+                                    let mint_tx = pos.mint.clone();
+                                    tokio::spawn(async move {
+                                        lifecycle_logger_tx.lock().await.log_event(
+                                            position_lifecycle_logger::LifecycleEvent::SellTxSent {
+                                                mint: mint_tx,
+                                                signature: None,
+                                            }
+                                        );
+                                    });
                                 }
                             }
                         }
@@ -315,6 +672,8 @@ async fn main() -> Result<()> {
                     &decision_sender,
                     &position_tracker,
                     &position_sizer,
+                    &lifecycle_logger,
+                    &telegram_client,
                     &config,
                 ).await {
                     warn!("⚠️  Failed to process late opportunity: {}", e);
@@ -335,10 +694,87 @@ async fn main() -> Result<()> {
                     &decision_sender,
                     &position_tracker,
                     &position_sizer,
+                    &lifecycle_logger,
+                    &telegram_client,
                     &config,
                 ).await {
                     warn!("⚠️  Failed to process copy trade: {}", e);
                 }
+            }
+            
+            AdviceMessage::WalletActivity(ref wallet_activity) => {
+                info!("👤 Wallet activity: {} | {}", 
+                    hex::encode(&wallet_activity.wallet[..4]),
+                    hex::encode(&wallet_activity.mint[..4]));
+                
+                // Convert WalletActivity to CopyTrade for processing
+                // WalletActivity is the real-time signal from data-mining's trade stream
+                let copy_trade = udp_bus::messages::CopyTradeAdvice {
+                    msg_type: 11, // CopyTrade type
+                    mint: wallet_activity.mint,
+                    wallet: wallet_activity.wallet,
+                    side: wallet_activity.action, // action field maps to side
+                    size_sol: wallet_activity.size_sol,
+                    wallet_tier: wallet_activity.wallet_tier,
+                    wallet_confidence: wallet_activity.confidence, // confidence field
+                    _padding: [0u8; 6],
+                };
+                
+                if let Err(e) = process_copy_trade(
+                    &copy_trade,
+                    &mint_cache,
+                    &wallet_cache,
+                    &scorer,
+                    &validator,
+                    &mut guardrails,
+                    &logger,
+                    &decision_sender,
+                    &position_tracker,
+                    &position_sizer,
+                    &lifecycle_logger,
+                    &telegram_client,
+                    &config,
+                ).await {
+                    warn!("⚠️  Failed to process wallet activity: {}", e);
+                }
+            }
+            
+            AdviceMessage::WindowMetrics(ref metrics) => {
+                // Update mint cache with real-time market metrics from data-mining
+                let mint_bytes: [u8; 32] = metrics.mint;
+                if let Ok(mint_pubkey) = solana_sdk::pubkey::Pubkey::try_from(mint_bytes.as_slice()) {
+                    let volume_sol_1s = metrics.volume_sol(); // Unscale from u32
+                    let buyers_1s = metrics.unique_buyers_1s as u32;
+                    
+                    // WindowMetrics provides 1s volume and buyers
+                    // Approximate 60s values by assuming sustained activity (conservative estimate)
+                    // For high-frequency tokens, this will be updated frequently enough
+                    let vol_60s_sol = volume_sol_1s * 20.0; // Conservative: 1s × 20 ≈ 20s worth
+                    let buyers_60s = buyers_1s.saturating_mul(10); // Conservative: 1s × 10 ≈ 10s worth
+                    
+                    // Update cache (uses existing update_from_signal method)
+                    mint_cache.update_from_signal(
+                        mint_pubkey,
+                        Some(vol_60s_sol),
+                        Some(buyers_60s),
+                        None, // age_seconds
+                        None, // follow_through_score
+                        Some(buyers_1s), // buyers_2s (approximate with 1s data)
+                        Some(volume_sol_1s), // vol_5s_sol (approximate with 1s data)
+                    );
+                    
+                    debug!(
+                        "💾 Mint cache updated via UDP: {} | vol_1s: {:.2} SOL, buyers_1s: {}",
+                        mint_pubkey.to_string().chars().take(12).collect::<String>(),
+                        volume_sol_1s,
+                        buyers_1s
+                    );
+                }
+            }
+            
+            // Handle all other AdviceMessage variants (not yet implemented)
+            _ => {
+                debug!("Received unhandled advice type");
             }
         }
     }
@@ -357,6 +793,8 @@ async fn process_late_opportunity(
     sender: &Arc<DecisionBusSender>,
     position_tracker: &Arc<tokio::sync::RwLock<decision_engine::PositionTracker>>,
     position_sizer: &Arc<decision_engine::PositionSizer>,
+    lifecycle_logger: &Arc<tokio::sync::Mutex<position_lifecycle_logger::PositionLifecycleLogger>>,
+    telegram_client: &Option<Arc<telegram::TelegramClient>>,
     config: &Config,
 ) -> Result<()> {
     use metrics::{DecisionPathway, RejectionReason};
@@ -465,6 +903,7 @@ async fn process_late_opportunity(
         &late.mint,
         None,
         None,
+        None, // No creator wallet for late opportunity
     ) {
         info!("🛡️  Blocked by guardrails: {}", reason);
         metrics::record_guardrail_block(metrics::GuardrailType::RateLimit);
@@ -473,7 +912,7 @@ async fn process_late_opportunity(
     }
     
     // Record decision with guardrails for tracking
-    guardrails.record_decision(3, &late.mint, None);
+    guardrails.record_decision(3, &late.mint, None, None);
     
     // 6. Build trade decision
     let decision = udp_bus::TradeDecision::new_buy(
@@ -481,6 +920,7 @@ async fn process_late_opportunity(
         position_size_lamports,
         150, // 1.5% slippage
         confidence,
+        3, // entry_type: 3 = LateOpportunity
     );
     
     // 7. Log decision
@@ -509,10 +949,58 @@ async fn process_late_opportunity(
     
     logger.log_decision(log_entry)?;
     
+    // Log lifecycle event: BUY decision
+    let lifecycle_logger_clone = lifecycle_logger.clone();
+    let mint_str = bs58::encode(&late.mint).into_string();
+    let entry_price = mint_features.current_price;
+    tokio::spawn(async move {
+        lifecycle_logger_clone.lock().await.log_event(
+            position_lifecycle_logger::LifecycleEvent::BuyDecision {
+                mint: mint_str.clone(),
+                size_sol: position_size_sol,
+                size_usd: position_size_usd,
+                confidence,
+                entry_price_sol: entry_price,
+                trigger_source: "late_opportunity".to_string(),
+            }
+        );
+    });
+    
     // 8. Send to executor
     sender.send_decision(&decision).await?;
     metrics::record_decision_sent();
     metrics::record_decision_approved();
+    
+    // Send Telegram notification for BUY
+    if let Some(tg) = telegram_client {
+        let mint_str = bs58::encode(&late.mint).into_string();
+        let tg_clone = tg.clone();
+        tokio::spawn(async move {
+            let msg = format!(
+                "🟢 BUY DECISION\n\nMint: {}\nSize: {:.4} SOL (${:.2})\nPrice: {:.10} SOL\nConfidence: {}/100\nTrigger: Late Opportunity",
+                &mint_str[..12],
+                position_size_sol,
+                position_size_usd,
+                entry_price,
+                confidence
+            );
+            if let Err(e) = tg_clone.send_message(&msg).await {
+                warn!("Failed to send Telegram notification: {}", e);
+            }
+        });
+    }
+    
+    // Log lifecycle event: BUY TX sent
+    let lifecycle_logger_clone2 = lifecycle_logger.clone();
+    let mint_str2 = bs58::encode(&late.mint).into_string();
+    tokio::spawn(async move {
+        lifecycle_logger_clone2.lock().await.log_event(
+            position_lifecycle_logger::LifecycleEvent::BuyTxSent {
+                mint: mint_str2,
+                signature: None, // Executor will provide signature via confirmation
+            }
+        );
+    });
     
     info!("✅ DECISION SENT: BUY {} ({} SOL, conf={})",
           hex::encode(&late.mint[..8]),
@@ -532,10 +1020,16 @@ async fn process_late_opportunity(
         entry_price_sol: mint_features.current_price,
         tokens: (position_size_sol / mint_features.current_price) * 0.99, // Account for slippage
         entry_confidence: confidence,
+        entry_path: decision_engine::triggers::EntryTrigger::RankBased,
+        early_score: late.follow_through_score as f64 / 10.0, // Convert to 0-15 scale
         profit_targets: (30.0, 60.0, 100.0), // 30%, 60%, 100% profit targets
         stop_loss_pct: 15.0, // 15% stop loss
         max_hold_secs: 300, // 5 minutes max hold
         trigger_source: "late_opportunity".to_string(),
+        sell_retry_count: 0,
+        entry_mc_sol: mint_features.mc_sol,
+        mc_10s_ago: None,
+        mc_20s_ago: None,
     };
     
     position_tracker.write().await.add_position(entry_position)?;
@@ -556,6 +1050,8 @@ async fn process_copy_trade(
     sender: &Arc<DecisionBusSender>,
     position_tracker: &Arc<tokio::sync::RwLock<decision_engine::PositionTracker>>,
     position_sizer: &Arc<decision_engine::PositionSizer>,
+    lifecycle_logger: &Arc<tokio::sync::Mutex<position_lifecycle_logger::PositionLifecycleLogger>>,
+    telegram_client: &Option<Arc<telegram::TelegramClient>>,
     config: &Config,
 ) -> Result<()> {
     use metrics::{DecisionPathway, RejectionReason};
@@ -675,7 +1171,7 @@ async fn process_copy_trade(
     };
     
     // 6. Check guardrails
-    if let Err(reason) = guardrails.check_decision_allowed(2, &copy.mint, Some(&copy.wallet), Some(wallet_features.tier as u8)) {
+    if let Err(reason) = guardrails.check_decision_allowed(2, &copy.mint, Some(&copy.wallet), Some(wallet_features.tier as u8), None) {
         info!("🛡️  Blocked by guardrails: {}", reason);
         metrics::record_guardrail_block(metrics::GuardrailType::WalletCooling);
         metrics::record_decision_rejected(RejectionReason::Guardrails);
@@ -683,7 +1179,7 @@ async fn process_copy_trade(
     }
     
     // Record decision with guardrails for tracking
-    guardrails.record_decision(2, &copy.mint, Some(&copy.wallet));
+    guardrails.record_decision(2, &copy.mint, Some(&copy.wallet), None);
     
     // 7. Build decision
     let decision = udp_bus::TradeDecision::new_buy(
@@ -691,6 +1187,7 @@ async fn process_copy_trade(
         position_size_lamports,
         150,
         confidence,
+        2, // entry_type: 2 = CopyTrade
     );
     
     // 8. Log
@@ -724,6 +1221,30 @@ async fn process_copy_trade(
     metrics::record_decision_sent();
     metrics::record_decision_approved();
     
+    // Send Telegram notification for COPY BUY
+    if let Some(tg) = telegram_client {
+        let mint_str = bs58::encode(&copy.mint).into_string();
+        let wallet_str = bs58::encode(&copy.wallet).into_string();
+        let tier = wallet_features.tier;
+        let tg_clone = tg.clone();
+        let entry_price = mint_features.current_price;
+        tokio::spawn(async move {
+            let msg = format!(
+                "👥 COPY TRADE BUY\n\nMint: {}\nWallet: {}\nTier: {:?}\nSize: {:.4} SOL (${:.2})\nPrice: {:.10} SOL\nConfidence: {}/100",
+                &mint_str[..12],
+                &wallet_str[..12],
+                tier,
+                position_size_sol,
+                position_size_usd,
+                entry_price,
+                confidence
+            );
+            if let Err(e) = tg_clone.send_message(&msg).await {
+                warn!("Failed to send Telegram notification: {}", e);
+            }
+        });
+    }
+    
     info!("✅ DECISION SENT: COPY BUY {} from wallet tier {:?} (conf={})",
           hex::encode(&copy.mint[..8]),
           wallet_features.tier,
@@ -742,10 +1263,16 @@ async fn process_copy_trade(
         entry_price_sol: mint_features.current_price,
         tokens: (position_size_sol / mint_features.current_price) * 0.99, // Account for slippage
         entry_confidence: confidence,
+        entry_path: decision_engine::triggers::EntryTrigger::CopyTrade,
+        early_score: 0.0, // Copy trades don't have early score
         profit_targets: (30.0, 60.0, 100.0), // 30%, 60%, 100% profit targets
         stop_loss_pct: 15.0, // 15% stop loss
         max_hold_secs: 300, // 5 minutes max hold
         trigger_source: "copy_trade".to_string(),
+        sell_retry_count: 0,
+        entry_mc_sol: mint_features.mc_sol,
+        mc_10s_ago: None,
+        mc_20s_ago: None,
     };
     
     position_tracker.write().await.add_position(entry_position)?;
@@ -901,6 +1428,11 @@ async fn update_mint_cache(
                 last_update: last_update as u64,
                 buyers_2s: buyers_2s as u32,
                 vol_5s_sol,
+                volatility_60s: 0.0, // TODO: Calculate from price history
+                mempool_pending_buys: 0, // TODO: Get from mempool tracker
+                mempool_pending_sells: 0, // TODO: Get from mempool tracker
+                mc_sol: current_price * 1_000_000_000.0, // Rough estimate
+                mempool_volume_sol: 0.0, // TODO: Get from mempool tracker
             };
             
             mint_cache_clone.insert(mint, features);

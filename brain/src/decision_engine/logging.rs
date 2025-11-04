@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use log::{info, warn, error};
+use log::info;
 use anyhow::{Result, Context};
 
 /// Entry trigger type for logging

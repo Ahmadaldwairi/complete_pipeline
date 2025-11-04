@@ -429,21 +429,26 @@ impl PumpParser {
         let is_buy = self.read_bool(data, &mut offset)?;
         let user = self.read_pubkey(data, &mut offset)?;
         let _timestamp = self.read_i64(data, &mut offset)?;
-        let _virtual_sol_reserves = self.read_u64(data, &mut offset)?;
-        let _virtual_token_reserves = self.read_u64(data, &mut offset)?;
+        let virtual_sol_reserves = self.read_u64(data, &mut offset)?;
+        let virtual_token_reserves = self.read_u64(data, &mut offset)?;
 
+        // Calculate price: SOL per token
+        // sol_amount is in lamports (1e9 per SOL)
+        // token_amount is in raw units (1e6 per token for pump.fun)
+        // price = (sol_amount / 1e9) / (token_amount / 1e6) = sol_amount / token_amount * 1e-3
         let price = if token_amount > 0 {
-            ((sol_amount as f64) / 1e9) / (token_amount as f64)
+            ((sol_amount as f64) / 1e9) / ((token_amount as f64) / 1e6)
         } else {
-            0.0
+            0.0 // If token_amount is 0 (malformed), use 0
         };
 
         debug!(
-            "Parsed trade event: mint={}, side={:?}, amount_sol={}, price={}",
+            "Parsed trade event: mint={}, side={:?}, amount_sol={}, price={}, virt_sol={}",
             mint, 
             if is_buy { TradeSide::Buy } else { TradeSide::Sell }, 
             (sol_amount as f64) / 1e9, 
-            price
+            price,
+            (virtual_sol_reserves as f64) / 1e9
         );
 
         Ok(Some(PumpEvent::Trade {
@@ -461,6 +466,8 @@ impl PumpParser {
             amount_sol: sol_amount,
             price,
             is_amm: false,
+            virtual_sol_reserves,
+            virtual_token_reserves,
         }))
     }
 

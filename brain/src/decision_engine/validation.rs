@@ -154,6 +154,10 @@ pub enum ValidationError {
     InsufficientLiquidity {
         available_liquidity: f64,
     },
+    WeakDemand {
+        buyers_2s: u32,
+        vol_5s: f64,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -179,6 +183,9 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::InsufficientLiquidity { available_liquidity } => {
                 write!(f, "Insufficient liquidity: ${:.2}", available_liquidity)
+            }
+            ValidationError::WeakDemand { buyers_2s, vol_5s } => {
+                write!(f, "Weak demand: {} buyers in 2s, {:.2} SOL vol in 5s", buyers_2s, vol_5s)
             }
         }
     }
@@ -350,6 +357,16 @@ impl TradeValidator {
     
     /// Check for suspicious patterns that might indicate a rug
     fn check_suspicious_patterns(&self, mint_features: &MintFeatures) -> Result<()> {
+        // Pattern 0: Weak demand (single buyer in 2s with low volume)
+        // This catches tokens with only 1 buyer in the last 2 seconds AND low volume in 5s
+        // Indicates insufficient market interest for a profitable trade
+        if mint_features.buyers_2s == 1 && mint_features.vol_5s_sol < 0.5 {
+            bail!(ValidationError::WeakDemand {
+                buyers_2s: mint_features.buyers_2s,
+                vol_5s: mint_features.vol_5s_sol,
+            });
+        }
+        
         // Pattern 1: Very low buyer count with high volume (bot trading)
         if mint_features.vol_60s_sol > 20.0 && mint_features.buyers_60s < 5 {
             bail!(ValidationError::SuspiciousPattern {
@@ -372,7 +389,9 @@ impl TradeValidator {
         }
         
         // Pattern 3: Zero or near-zero price (likely broken token)
-        if mint_features.current_price < 0.000001 {
+        // Note: Pump.fun tokens can have extremely small prices (e.g., 1e-14) due to large supplies
+        // Only reject if price is literally 0.0
+        if mint_features.current_price <= 0.0 {
             bail!(ValidationError::SuspiciousPattern {
                 reason: format!("Price too low: {:.10}", mint_features.current_price)
             });
@@ -463,6 +482,7 @@ mod tests {
             buyers_2s: 8,
             vol_5s_sol: 10.0,
             last_update: 0,
+            volatility_60s: 0.12,
         };
         
         let result = validator.validate(

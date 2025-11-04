@@ -7,10 +7,10 @@
 //! - Path D: Late opportunity (mature launches)
 
 use solana_sdk::pubkey::Pubkey;
-use anyhow::{Result, Context, bail};
-use log::{info, debug, warn};
+use anyhow::{Result, bail};
+use log::debug;
 use crate::feature_cache::{MintFeatures, WalletFeatures};
-use crate::decision_engine::{TradeValidator, ValidatedTrade, ValidationError};
+use crate::decision_engine::{TradeValidator, ValidatedTrade};
 use crate::udp_bus::messages::TradeDecision;
 
 /// Entry trigger type for logging and analysis
@@ -33,61 +33,126 @@ impl EntryTrigger {
     }
 }
 
-/// Configuration for entry triggers
+/// Configuration for entry triggers (PATH-SPECIFIC for 1M+ MC hunting)
 #[derive(Debug, Clone)]
 pub struct TriggerConfig {
-    // Path A: Rank-based
-    pub max_rank_for_instant: u8,          // Default: 2
-    pub min_follow_through_rank: u8,       // Default: 60
-    pub rank_position_size_sol: f64,       // Default: 10.0 SOL
+    // ========================================
+    // PATH A: RANK-BASED (Hot New Launches)
+    // ========================================
+    // Objective: Catch new coins before spike (first 10 buyers)
+    pub max_rank_for_instant: u8,          // Default: 5 (1M+ MC mode)
+    pub min_follow_through_rank: u8,       // Default: 25 (1M+ MC mode)
+    pub min_decision_conf_rank: u8,        // Path-specific confidence: 55
+    pub rank_position_size_sol: f64,       // Default: 50.0 SOL (1M+ MC mode)
+    pub rank_max_hold_secs: u64,           // Default: 30s
     
-    // Path B: Momentum
-    pub min_buyers_2s: u32,                // Default: 5
-    pub min_vol_5s_sol: f64,               // Default: 8.0 SOL
-    pub min_follow_through_momentum: u8,   // Default: 60
-    pub momentum_position_size_sol: f64,   // Default: 8.0 SOL
+    // ========================================
+    // PATH B: MOMENTUM (Surge Rider)
+    // ========================================
+    // Objective: Enter during confirmed surges (100K→1M MC)
+    pub min_buyers_2s: u32,                // Default: 3 (1M+ MC mode)
+    pub min_vol_5s_sol: f64,               // Default: 4.0 SOL (1M+ MC mode)
+    pub min_follow_through_momentum: u8,   // Default: 35 (1M+ MC mode)
+    pub min_decision_conf_momentum: u8,    // Path-specific confidence: 65
+    pub momentum_position_size_sol: f64,   // Default: 75.0 SOL (1M+ MC mode)
+    pub momentum_max_hold_secs: u64,       // Default: 120s (2 min)
     
-    // Path C: Copy-trade
+    // ========================================
+    // PATH C: COPY-TRADE (Whale Following)
+    // ========================================
+    // Objective: Fast scalp following proven wallets
     pub min_copy_tier: u8,                 // Default: 1 (Tier C)
-    pub min_copy_confidence: u8,           // Default: 75
+    pub min_copy_confidence: u8,           // Default: 65 (1M+ MC mode)
+    pub min_decision_conf_copy: u8,        // Path-specific confidence: 70
     pub min_copy_size_sol: f64,            // Default: 0.25 SOL
     pub copy_multiplier: f64,              // Default: 1.2x wallet's size
+    pub copy_position_size_base: f64,      // Default: 25.0 SOL (1M+ MC mode)
+    pub copy_max_hold_secs: u64,           // Default: 15s
     
-    // Path D: Late opportunity
+    // ========================================
+    // PATH D: LATE-OPPORTUNITY (DISABLED)
+    // ========================================
+    // Objective: Second waves (not for 1M+ MC hunting)
+    pub enable_late_opportunity: bool,     // Default: false (disabled for 1M+ MC)
     pub min_launch_age_seconds: u64,       // Default: 1200 (20 min)
     pub min_vol_60s_late: f64,             // Default: 35.0 SOL
     pub min_buyers_60s_late: u32,          // Default: 40
     pub min_follow_through_late: u8,       // Default: 70
     pub late_position_size_sol: f64,       // Default: 5.0 SOL
     
-    // General
+    // ========================================
+    // GENERAL & SAFETY
+    // ========================================
     pub default_slippage_bps: u16,         // Default: 150 (1.5%)
+    pub max_position_size_sol: f64,        // Default: 150.0 SOL (hard cap)
+    pub min_position_size_sol: f64,        // Default: 25.0 SOL (testing minimum)
+    
+    // Early scoring integration
+    pub min_early_score: f64,              // Default: 6.0 (7-signal system)
+    pub high_confidence_score: f64,        // Default: 8.0 (max position size)
 }
 
 impl Default for TriggerConfig {
     fn default() -> Self {
+        // ==========================================
+        // 🎯 1M+ MC HUNTING MODE
+        // ==========================================
+        // Optimized for catching tokens before they hit 1M market cap
+        // Path-specific thresholds for different entry strategies
+        // Position sizes scaled for $100 entries
+        // ==========================================
+        
         Self {
-            max_rank_for_instant: 2,
-            min_follow_through_rank: 60,
-            rank_position_size_sol: 10.0,
+            // ========================================
+            // PATH A: RANK-BASED (Hot New Launches)
+            // ========================================
+            max_rank_for_instant: 5,               // Expand from 2 → top 5 launches
+            min_follow_through_rank: 25,           // Loosen for faster entry
+            min_decision_conf_rank: 55,            // Lower than global for speed
+            rank_position_size_sol: 50.0,          // Scale up for $100 entries
+            rank_max_hold_secs: 30,                // Quick exits
             
-            min_buyers_2s: 5,
-            min_vol_5s_sol: 8.0,
-            min_follow_through_momentum: 60,
-            momentum_position_size_sol: 8.0,
+            // ========================================
+            // PATH B: MOMENTUM (Surge Rider)
+            // ========================================
+            min_buyers_2s: 3,                      // Raise from 2 for quality
+            min_vol_5s_sol: 4.0,                   // Raise from 2.0 for genuine interest
+            min_follow_through_momentum: 35,       // Balance speed vs quality
+            min_decision_conf_momentum: 65,        // Moderate confidence
+            momentum_position_size_sol: 75.0,      // Scale up for confirmed waves
+            momentum_max_hold_secs: 120,           // 2 min max (velocity-based exit)
             
-            min_copy_tier: 1,
-            min_copy_confidence: 75,
-            min_copy_size_sol: 0.25,
-            copy_multiplier: 1.2,
+            // ========================================
+            // PATH C: COPY-TRADE (Whale Following)
+            // ========================================
+            min_copy_tier: 1,                      // Tier C (80 confidence)
+            min_copy_confidence: 65,               // Raise from 50 for quality
+            min_decision_conf_copy: 70,            // High quality wallets only
+            min_copy_size_sol: 0.25,               // Minimum whale position
+            copy_multiplier: 1.2,                  // Our size = 1.2x whale
+            copy_position_size_base: 25.0,         // Base size for copies
+            copy_max_hold_secs: 15,                // Fast in/out
             
-            min_launch_age_seconds: 1200,
-            min_vol_60s_late: 35.0,
-            min_buyers_60s_late: 40,
-            min_follow_through_late: 70,
-            late_position_size_sol: 5.0,
+            // ========================================
+            // PATH D: LATE-OPPORTUNITY (DISABLED)
+            // ========================================
+            enable_late_opportunity: false,        // 🚫 DISABLED for 1M+ MC hunting
+            min_launch_age_seconds: 1200,          // 20 min (not used when disabled)
+            min_vol_60s_late: 35.0,                // Production value
+            min_buyers_60s_late: 40,               // Production value
+            min_follow_through_late: 70,           // Production value
+            late_position_size_sol: 5.0,           // Production value
             
-            default_slippage_bps: 150,
+            // ========================================
+            // GENERAL & SAFETY
+            // ========================================
+            default_slippage_bps: 150,             // 1.5% slippage
+            max_position_size_sol: 150.0,          // Hard cap per trade
+            min_position_size_sol: 25.0,           // Testing minimum
+            
+            // Early scoring (7-signal system integration)
+            min_early_score: 6.0,                  // Minimum score to trigger
+            high_confidence_score: 8.0,            // Max position size threshold
         }
     }
 }
@@ -112,6 +177,77 @@ impl TriggerEngine {
         Self {
             config,
             validator: TradeValidator::new(),
+        }
+    }
+    
+    /// Calculate position size based on early_score and entry path
+    /// 
+    /// Higher scores → larger positions (up to max cap)
+    /// Each path has different base sizing strategy
+    /// 
+    /// Returns: Position size in SOL
+    pub fn calculate_position_size(&self, early_score: f64, path: EntryTrigger) -> f64 {
+        let size = match path {
+            EntryTrigger::RankBased => {
+                // Rank-based: Scale by score
+                if early_score >= 9.0 {
+                    self.config.rank_position_size_sol * 2.0  // 100 SOL
+                } else if early_score >= self.config.high_confidence_score {
+                    self.config.rank_position_size_sol * 1.5  // 75 SOL
+                } else if early_score >= 7.0 {
+                    self.config.rank_position_size_sol        // 50 SOL
+                } else {
+                    self.config.min_position_size_sol         // 25 SOL (testing)
+                }
+            },
+            EntryTrigger::Momentum => {
+                // Momentum: Scale by score (larger base)
+                if early_score >= 9.0 {
+                    self.config.momentum_position_size_sol * 1.33  // 100 SOL
+                } else if early_score >= self.config.high_confidence_score {
+                    self.config.momentum_position_size_sol         // 75 SOL
+                } else if early_score >= 7.0 {
+                    self.config.momentum_position_size_sol * 0.67  // 50 SOL
+                } else {
+                    self.config.min_position_size_sol              // 25 SOL
+                }
+            },
+            EntryTrigger::CopyTrade => {
+                // Copy-trade: Conservative sizing (quick scalps)
+                if early_score >= self.config.high_confidence_score {
+                    self.config.copy_position_size_base * 2.0  // 50 SOL
+                } else {
+                    self.config.copy_position_size_base        // 25 SOL
+                }
+            },
+            EntryTrigger::LateOpportunity => {
+                // Late: Not used for 1M+ MC hunting
+                self.config.late_position_size_sol
+            }
+        };
+        
+        // Apply safety caps
+        size.max(self.config.min_position_size_sol)
+            .min(self.config.max_position_size_sol)
+    }
+    
+    /// Get path-specific confidence threshold
+    pub fn get_min_decision_conf(&self, path: EntryTrigger) -> u8 {
+        match path {
+            EntryTrigger::RankBased => self.config.min_decision_conf_rank,
+            EntryTrigger::Momentum => self.config.min_decision_conf_momentum,
+            EntryTrigger::CopyTrade => self.config.min_decision_conf_copy,
+            EntryTrigger::LateOpportunity => 75,  // Not used
+        }
+    }
+    
+    /// Get path-specific max hold time
+    pub fn get_max_hold_time(&self, path: EntryTrigger) -> u64 {
+        match path {
+            EntryTrigger::RankBased => self.config.rank_max_hold_secs,
+            EntryTrigger::Momentum => self.config.momentum_max_hold_secs,
+            EntryTrigger::CopyTrade => self.config.copy_max_hold_secs,
+            EntryTrigger::LateOpportunity => 300,  // Not used
         }
     }
     
@@ -173,15 +309,22 @@ impl TriggerEngine {
         validated: &ValidatedTrade,
         trigger: EntryTrigger,
     ) -> TradeDecision {
-        TradeDecision {
-            msg_type: 1,  // BUY
-            mint: validated.mint.to_bytes(),
-            side: 0,  // BUY
-            size_lamports: validated.size_lamports,
-            slippage_bps: validated.slippage_bps,
-            confidence: validated.follow_through_score,
-            _padding: [0u8; 5],
-        }
+        // Convert EntryTrigger to entry_type u8
+        let entry_type = match trigger {
+            EntryTrigger::RankBased => 0,
+            EntryTrigger::Momentum => 1,
+            EntryTrigger::CopyTrade => 2,
+            EntryTrigger::LateOpportunity => 3,
+        };
+        
+        // Use new_buy() constructor which automatically calculates checksum
+        TradeDecision::new_buy(
+            validated.mint.to_bytes(),
+            validated.size_lamports,
+            validated.slippage_bps,
+            validated.follow_through_score,
+            entry_type,
+        )
     }
 }
 
@@ -202,6 +345,7 @@ mod tests {
             buyers_2s: 10,
             vol_5s_sol: 15.0,
             last_update: 0,
+            volatility_60s: 0.10,
         }
     }
     
@@ -507,6 +651,7 @@ mod momentum_tests {
             buyers_2s,
             vol_5s_sol: vol_5s,
             last_update: 0,
+            volatility_60s: 0.08,
         }
     }
     
@@ -577,6 +722,7 @@ mod copy_trade_tests {
             buyers_2s: 10,
             vol_5s_sol: 15.0,
             last_update: 0,
+            volatility_60s: 0.06,
         }
     }
     
@@ -635,6 +781,7 @@ mod late_opportunity_tests {
             buyers_2s: 5,
             vol_5s_sol: 10.0,
             last_update: 0,
+            volatility_60s: 0.20,
         }
     }
     

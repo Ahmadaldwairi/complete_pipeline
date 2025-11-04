@@ -32,6 +32,9 @@ logs/
 *.bak
 *.old
 *.tmp
+*.tar.gz
+*.zip
+*.7z
 
 # Python cache
 __pycache__/

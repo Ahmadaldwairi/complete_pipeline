@@ -129,11 +129,19 @@ impl FollowThroughScorer {
             (wallet_quality_score as f64 * self.quality_weight)
         ).round() as u8;
         
+        // Apply volatility penalty for whipsaw charts (reduce false positives)
+        let final_score = if mint_features.volatility_60s > 0.25 {
+            debug!("📉 Volatility penalty applied: {:.3} > 0.25", mint_features.volatility_60s);
+            total_score.saturating_sub(10)
+        } else {
+            total_score
+        };
+        
         ScoreComponents {
             buyer_score,
             volume_score,
             wallet_quality_score,
-            total_score: total_score.min(100),
+            total_score: final_score.min(100),
             buyers_2s,
             vol_5s_sol,
             avg_wallet_confidence: wallet_quality_proxy * 100.0,
@@ -172,9 +180,17 @@ impl FollowThroughScorer {
             (wallet_quality_score as f64 * self.quality_weight)
         ).round() as u8;
         
+        // Apply volatility penalty for whipsaw charts
+        let final_score = if mint_features.volatility_60s > 0.25 {
+            debug!("📉 Volatility penalty applied: {:.3} > 0.25", mint_features.volatility_60s);
+            total_score.saturating_sub(10)
+        } else {
+            total_score
+        };
+        
         debug!(
             "📊 Follow-through: total={} (buyers={}, vol={}, quality={}) | {}/{}b, {:.2}SOL",
-            total_score, buyer_score, volume_score, wallet_quality_score,
+            final_score, buyer_score, volume_score, wallet_quality_score,
             buyers_2s, self.max_buyers_2s, vol_5s_sol
         );
         
@@ -182,7 +198,7 @@ impl FollowThroughScorer {
             buyer_score,
             volume_score,
             wallet_quality_score,
-            total_score: total_score.min(100),
+            total_score: final_score.min(100),
             buyers_2s,
             vol_5s_sol,
             avg_wallet_confidence,

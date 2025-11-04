@@ -4,6 +4,15 @@
 //! Considers confidence score, available capital, concurrent positions, and risk limits.
 
 use log::{info, debug};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+/// Recent trade outcome for adaptive scaling
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TradeResult {
+    Win,
+    Loss,
+}
 
 /// Position sizing strategy
 #[derive(Debug, Clone)]
@@ -54,6 +63,15 @@ pub struct PositionSizerConfig {
     
     /// Reduce size when near position limit
     pub scale_down_near_limit: bool,
+    
+    /// Enable adaptive scaling (boost after winning streak)
+    pub enable_adaptive_scaling: bool,
+    
+    /// Number of consecutive wins needed for scaling boost
+    pub adaptive_win_streak: usize,  // Default: 3
+    
+    /// Scaling multiplier after win streak
+    pub adaptive_multiplier: f64,  // Default: 1.1 (10% boost)
 }
 
 impl Default for PositionSizerConfig {
@@ -69,6 +87,9 @@ impl Default for PositionSizerConfig {
             max_position_pct: 5.0,  // 5% max per position
             risk_per_trade_pct: 2.0, // 2% risk per trade
             scale_down_near_limit: true,
+            enable_adaptive_scaling: true,
+            adaptive_win_streak: 3,
+            adaptive_multiplier: 1.1,
         }
     }
 }
@@ -76,6 +97,7 @@ impl Default for PositionSizerConfig {
 /// Position sizer - calculates optimal position sizes
 pub struct PositionSizer {
     config: PositionSizerConfig,
+    recent_outcomes: Arc<Mutex<VecDeque<TradeResult>>>,
 }
 
 impl PositionSizer {
@@ -87,8 +109,15 @@ impl PositionSizer {
         info!("   Max position: {} SOL ({:.1}%)", 
               config.max_position_sol, config.max_position_pct);
         info!("   Risk per trade: {:.1}%", config.risk_per_trade_pct);
+        info!("   Adaptive scaling: {} ({}x after {} wins)",
+              config.enable_adaptive_scaling,
+              config.adaptive_multiplier,
+              config.adaptive_win_streak);
         
-        Self { config }
+        Self { 
+            config,
+            recent_outcomes: Arc::new(Mutex::new(VecDeque::new())),
+        }
     }
     
     /// Calculate position size based on confidence and portfolio state
@@ -111,11 +140,25 @@ impl PositionSizer {
         // 1. Calculate base size from strategy
         let base_size = self.calculate_base_size(confidence);
         
-        // 2. Apply portfolio heat limit
-        let remaining_capacity = self.config.portfolio_sol - total_exposure_sol;
-        let heat_adjusted = base_size.min(remaining_capacity * 0.8); // Leave 20% buffer
+        // 2. Apply adaptive scaling if enabled
+        let adaptive_scaled = if self.config.enable_adaptive_scaling {
+            let win_streak = self.check_win_streak();
+            if win_streak >= self.config.adaptive_win_streak {
+                debug!("🔥 Adaptive boost: {} consecutive wins, applying {}x multiplier",
+                       win_streak, self.config.adaptive_multiplier);
+                base_size * self.config.adaptive_multiplier
+            } else {
+                base_size
+            }
+        } else {
+            base_size
+        };
         
-        // 3. Apply position limit scaling
+        // 3. Apply portfolio heat limit
+        let remaining_capacity = self.config.portfolio_sol - total_exposure_sol;
+        let heat_adjusted = adaptive_scaled.min(remaining_capacity * 0.8); // Leave 20% buffer
+        
+        // 4. Apply position limit scaling
         let limit_adjusted = if self.config.scale_down_near_limit && max_positions > 0 {
             let utilization = active_positions as f64 / max_positions as f64;
             if utilization >= 0.8 {
@@ -131,7 +174,7 @@ impl PositionSizer {
             heat_adjusted
         };
         
-        // 4. Apply absolute limits
+        // 5. Apply absolute limits
         let final_size = limit_adjusted
             .max(self.config.min_position_sol)
             .min(self.config.max_position_sol)
@@ -139,8 +182,8 @@ impl PositionSizer {
         
         debug!("Position sizing: conf={}, active={}/{}, exposure={:.2} SOL",
                confidence, active_positions, max_positions, total_exposure_sol);
-        debug!("  base={:.3}, heat_adj={:.3}, limit_adj={:.3}, final={:.3} SOL",
-               base_size, heat_adjusted, limit_adjusted, final_size);
+        debug!("  base={:.3}, adaptive={:.3}, heat_adj={:.3}, limit_adj={:.3}, final={:.3} SOL",
+               base_size, adaptive_scaled, heat_adjusted, limit_adjusted, final_size);
         
         final_size
     }
@@ -202,6 +245,90 @@ impl PositionSizer {
     /// Get recommended size for a given scenario (for testing/logging)
     pub fn get_recommended_size(&self, confidence: u8) -> f64 {
         self.calculate_size(confidence, 0, 10, 0.0)
+    }
+    
+    /// Record trade outcome for adaptive scaling
+    pub fn record_outcome(&self, result: TradeResult) {
+        let mut outcomes = self.recent_outcomes.lock().unwrap();
+        outcomes.push_back(result);
+        
+        // Keep last 10 outcomes
+        while outcomes.len() > 10 {
+            outcomes.pop_front();
+        }
+        
+        debug!("📊 Recorded trade outcome: {:?} (history: {:?})", result, *outcomes);
+    }
+    
+    /// Check current win streak (consecutive wins from most recent)
+    /// Includes guardrails: hard cap at 5 consecutive wins to prevent runaway scaling
+    fn check_win_streak(&self) -> usize {
+        let outcomes = self.recent_outcomes.lock().unwrap();
+        
+        let mut streak = 0;
+        for outcome in outcomes.iter().rev() {
+            if *outcome == TradeResult::Win {
+                streak += 1;
+                // Hard cap at 5 wins to prevent excessive scaling
+                if streak >= 5 {
+                    break;
+                }
+            } else {
+                // Any loss resets the streak (automatic cooldown)
+                break;
+            }
+        }
+        
+        streak
+    }
+    
+    /// Reset adaptive scaling state (called on significant loss or manual reset)
+    pub fn reset_adaptive_scaling(&self) {
+        let mut outcomes = self.recent_outcomes.lock().unwrap();
+        outcomes.clear();
+        debug!("🔄 Adaptive scaling state reset");
+    }
+    
+    /// Calculate dynamic slippage in basis points based on market conditions
+    /// 
+    /// Factors:
+    /// - Base slippage: 150 bps (1.5%)
+    /// - Position count scaling: Higher positions = higher slippage (liquidity fragmentation)
+    /// - Confidence adjustment: Lower confidence = higher slippage (less favorable entry)
+    /// 
+    /// Returns slippage in basis points (100 bps = 1%)
+    pub fn calculate_slippage_bps(
+        &self,
+        confidence: u8,
+        active_positions: usize,
+        max_positions: usize,
+    ) -> u16 {
+        // Base slippage: 150 bps (1.5%)
+        let base_slippage = 150.0;
+        
+        // Position count factor: Scale from 1.0x to 1.5x based on utilization
+        let position_utilization = if max_positions > 0 {
+            active_positions as f64 / max_positions as f64
+        } else {
+            0.0
+        };
+        let position_factor = 1.0 + (position_utilization * 0.5); // 1.0x to 1.5x
+        
+        // Confidence factor: Lower confidence = higher slippage
+        // confidence 100 => 0.9x, confidence 50 => 1.1x, confidence 0 => 1.3x
+        let confidence_normalized = (confidence as f64 / 100.0).clamp(0.0, 1.0);
+        let confidence_factor = 1.3 - (confidence_normalized * 0.4); // 1.3x to 0.9x
+        
+        // Calculate final slippage
+        let final_slippage = base_slippage * position_factor * confidence_factor;
+        
+        // Cap between 100 bps (1%) and 500 bps (5%)
+        let capped_slippage = final_slippage.clamp(100.0, 500.0);
+        
+        debug!("Slippage calc: base={:.0}bps, pos_factor={:.2}x, conf_factor={:.2}x, final={:.0}bps",
+               base_slippage, position_factor, confidence_factor, capped_slippage);
+        
+        capped_slippage as u16
     }
 }
 

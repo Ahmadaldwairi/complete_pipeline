@@ -44,6 +44,21 @@ pub struct MintFeatures {
     
     /// Trading volume in last 5 seconds (SOL, for Path B trigger)
     pub vol_5s_sol: f64,
+    
+    /// Price volatility in 60s window (standard deviation)
+    pub volatility_60s: f64,
+    
+    /// Mempool pending buy transactions
+    pub mempool_pending_buys: u32,
+    
+    /// Mempool pending sell transactions
+    pub mempool_pending_sells: u32,
+    
+    /// Market cap in SOL (for velocity tracking)
+    pub mc_sol: f64,
+    
+    /// Mempool volume in SOL
+    pub mempool_volume_sol: f64,
 }
 
 impl Default for MintFeatures {
@@ -59,6 +74,11 @@ impl Default for MintFeatures {
             last_update: 0,
             buyers_2s: 0,
             vol_5s_sol: 0.0,
+            volatility_60s: 0.0,
+            mempool_pending_buys: 0,
+            mempool_pending_sells: 0,
+            mc_sol: 0.0,
+            mempool_volume_sol: 0.0,
         }
     }
 }
@@ -103,7 +123,77 @@ impl MintCache {
     
     /// Insert or update features for a mint
     pub fn insert(&self, mint: Pubkey, features: MintFeatures) {
+        // Check for potential update contention (rapid overwrites)
+        if let Some(existing) = self.cache.get(&mint) {
+            let time_since_last_update = features.last_update.saturating_sub(existing.last_update);
+            if time_since_last_update < 1 {
+                // Two updates within 1 second - potential contention (normal for high-frequency data)
+                debug!(
+                    "Rapid cache update for mint {}... ({}s since last update)",
+                    MintFeatures::mint_short(&mint),
+                    time_since_last_update
+                );
+            }
+        }
+        
         self.cache.insert(mint, features);
+    }
+    
+    /// Update cache from UDP signal (zero-latency updates)
+    /// Merges signal data with existing cache entry or creates new one
+    pub fn update_from_signal(&self, mint: Pubkey, vol_60s_sol: Option<f64>, buyers_60s: Option<u32>, 
+                                age_seconds: Option<u64>, follow_through_score: Option<u8>,
+                                buyers_2s: Option<u32>, vol_5s_sol: Option<f64>) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // Get existing or create new
+        if let Some(mut existing) = self.cache.get_mut(&mint) {
+            // Update only provided fields
+            if let Some(vol) = vol_60s_sol {
+                existing.vol_60s_sol = vol;
+            }
+            if let Some(buyers) = buyers_60s {
+                existing.buyers_60s = buyers;
+            }
+            if let Some(age) = age_seconds {
+                existing.age_since_launch = age;
+            }
+            if let Some(score) = follow_through_score {
+                existing.follow_through_score = score;
+            }
+            if let Some(buyers) = buyers_2s {
+                existing.buyers_2s = buyers;
+                // Use buyers_2s as proxy for mempool activity (Yellowstone shows confirmed txs only)
+                existing.mempool_pending_buys = buyers;
+            }
+            if let Some(vol) = vol_5s_sol {
+                existing.vol_5s_sol = vol;
+            }
+            existing.last_update = now;
+            
+            debug!("♻️  Updated cache from UDP: {} (age={}s)", 
+                MintFeatures::mint_short(&mint), now);
+        } else {
+            // Create new entry from signal
+            let features = MintFeatures {
+                age_since_launch: age_seconds.unwrap_or(0),
+                vol_60s_sol: vol_60s_sol.unwrap_or(0.0),
+                buyers_60s: buyers_60s.unwrap_or(0),
+                follow_through_score: follow_through_score.unwrap_or(0),
+                buyers_2s: buyers_2s.unwrap_or(0),
+                vol_5s_sol: vol_5s_sol.unwrap_or(0.0),
+                mempool_pending_buys: buyers_2s.unwrap_or(0), // Use buyers_2s as proxy
+                last_update: now,
+                ..Default::default()
+            };
+            self.cache.insert(mint, features);
+            
+            debug!("🆕 Created cache entry from UDP: {}", 
+                MintFeatures::mint_short(&mint));
+        }
     }
     
     /// Check if mint exists in cache
@@ -158,13 +248,16 @@ impl MintCache {
             self.cache.insert(mint, feature);
         }
         
-        // Remove stale entries (>5 minutes old)
+        // Remove stale entries (>300 seconds old)
+        // NOTE: We increased this from 30s to 300s to prevent removing cache entries
+        // for active positions during low trading activity. The emergency exit logic
+        // in main.rs will handle positions without cache after 30s.
         self.cache.retain(|_, v| {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            now.saturating_sub(v.last_update) < 300
+            now.saturating_sub(v.last_update) < 300  // 5 minutes
         });
         
         Ok(count)
@@ -193,7 +286,8 @@ impl MintCache {
                 w60.num_sells as sells_60s,
                 0 as total_supply,
                 COALESCE(w2.uniq_buyers, 0) as buyers_2s,
-                COALESCE(w5.vol_sol, 0.0) as vol_5s_sol
+                COALESCE(w5.vol_sol, 0.0) as vol_5s_sol,
+                COALESCE(w60.price_volatility, 0.0) as volatility_60s
              FROM windows w60
              INNER JOIN tokens t ON w60.mint = t.mint
              LEFT JOIN windows w2 ON w60.mint = w2.mint AND w2.window_sec = 2
@@ -219,6 +313,7 @@ impl MintCache {
             let total_supply: u64 = row.get(7)?;
             let buyers_2s: u32 = row.get(8)?;
             let vol_5s: f64 = row.get(9)?;
+            let volatility_60s: f64 = row.get(10)?;
             
             Ok((
                 mint_str,
@@ -231,6 +326,7 @@ impl MintCache {
                 total_supply,
                 buyers_2s,
                 vol_5s,
+                volatility_60s,
             ))
         })?;
         
@@ -238,7 +334,7 @@ impl MintCache {
         
         for row_result in rows {
             let (mint_str, launch_ts, price, vol_60s, buyers_60s, buys_60s, sells_60s, 
-                 total_supply, buyers_2s, vol_5s) = row_result?;
+                 total_supply, buyers_2s, vol_5s, volatility_60s) = row_result?;
             
             // Parse mint address
             let mint = match Pubkey::from_str(&mint_str) {
@@ -280,6 +376,11 @@ impl MintCache {
                 last_update: now,
                 buyers_2s,
                 vol_5s_sol: vol_5s,
+                volatility_60s,
+                mempool_pending_buys: buyers_2s,  // Use recent buyer count as proxy (Yellowstone shows confirmed only)
+                mempool_pending_sells: 0, // TODO: Populate from mempool watcher
+                mc_sol: 0.0,              // TODO: Calculate from price * supply
+                mempool_volume_sol: 0.0,  // TODO: Populate from mempool watcher
             };
             
             features.push((mint, feature));

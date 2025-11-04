@@ -1,0 +1,15 @@
+# Terminal 1 - Data Mining
+cd /home/sol/Desktop/solana-dev/Bots/scalper-bot/data-mining
+RUST_LOG=info ./target/release/data-mining
+
+# Terminal 2 - Brain
+cd /home/sol/Desktop/solana-dev/Bots/scalper-bot/brain
+RUST_LOG=info ./target/release/decision_engine
+
+# Terminal 3 - Mempool Watcher
+cd /home/sol/Desktop/solana-dev/Bots/scalper-bot/mempool-watcher
+RUST_LOG=info ./target/release/mempool-watcher
+
+# Terminal 4 - Execution
+cd /home/sol/Desktop/solana-dev/Bots/scalper-bot/execution
+RUST_LOG=info ./target/release/execution-bot

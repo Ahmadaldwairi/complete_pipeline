@@ -7,6 +7,13 @@ endpoint = "http://127.0.0.1:10000"
 max_retries = 10
 retry_delay_secs = 5
 
+[rpc]
+# Solana HTTP RPC endpoint for Pyth price polling
+# Use public mainnet RPC for account data (fallback: https://api.mainnet-beta.solana.com)
+endpoint = "https://api.mainnet-beta.solana.com"
+# RPC timeout in seconds
+timeout_secs = 10
+
 [programs]
 # Pump.fun bonding curve program
 pump_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"

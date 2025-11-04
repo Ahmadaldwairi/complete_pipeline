@@ -16,7 +16,7 @@
  */
 
 use prometheus::{
-    Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry,
+    Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;

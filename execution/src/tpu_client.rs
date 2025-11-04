@@ -8,7 +8,6 @@ use solana_sdk::{
     pubkey::Pubkey,
 };
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::sync::RwLock;
 use anyhow::Result;
 use log::{info, debug, warn};

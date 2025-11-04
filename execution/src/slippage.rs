@@ -15,9 +15,7 @@ use solana_transaction_status::{
     UiTransactionEncoding,
     UiInstruction,
     option_serializer::OptionSerializer,
-    EncodedConfirmedTransactionWithStatusMeta,
 };
-use std::str::FromStr;
 
 /// Slippage calculation result
 #[derive(Debug, Clone)]

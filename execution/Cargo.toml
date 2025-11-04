@@ -55,5 +55,6 @@ axum = "0.7"
 # Utils
 chrono = "0.4"
 bs58 = "0.5"
+hex = "0.4"
 rand = "0.8"
 uuid = { version = "1.7", features = ["v4"] }

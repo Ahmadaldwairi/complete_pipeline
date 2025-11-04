@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::time::Duration;

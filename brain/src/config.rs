@@ -20,6 +20,30 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub cache: CacheConfig,
     pub performance: PerformanceConfig,
+    pub confirmation: ConfirmationConfig,
+}
+
+/// Confirmation tracking configuration
+#[derive(Debug, Clone)]
+pub struct ConfirmationConfig {
+    /// Normal provisional position timeout (milliseconds)
+    pub pending_ttl_ms: u64,
+    /// Fast confirmation timeout for low mempool competition (milliseconds)
+    pub fast_confirm_ttl_ms: u64,
+    /// Position monitoring interval (seconds)
+    pub monitoring_interval_sec: u64,
+    /// Mint reservation TTL for BUY decisions (seconds)
+    pub reserve_buy_ttl_sec: u64,
+    /// Mint reservation TTL for SELL decisions (seconds)
+    pub reserve_sell_ttl_sec: u64,
+    /// BUY confirmation timeout (seconds)
+    pub confirm_timeout_buy_sec: u64,
+    /// SELL confirmation timeout (seconds)
+    pub confirm_timeout_sell_sec: u64,
+    /// Reconciliation watchdog interval (seconds)
+    pub reconciliation_interval_sec: u64,
+    /// Stale state threshold for reconciliation (seconds)
+    pub stale_state_threshold_sec: u64,
 }
 
 /// Decision engine threshold configuration
@@ -111,6 +135,18 @@ pub struct NetworkConfig {
     pub udp_recv_buffer_size: usize,
     /// UDP send buffer size
     pub udp_send_buffer_size: usize,
+    /// Yellowstone gRPC endpoint
+    pub yellowstone_endpoint: String,
+    /// Yellowstone x-token (optional)
+    pub yellowstone_token: Option<String>,
+    /// Solana RPC endpoint for polling backup
+    pub rpc_url: String,
+    /// Trading wallet pubkey for gRPC monitoring
+    pub wallet_pubkey: String,
+    /// Telegram bot token
+    pub telegram_bot_token: String,
+    /// Telegram chat ID
+    pub telegram_chat_id: String,
 }
 
 /// Logging configuration
@@ -162,14 +198,14 @@ impl Config {
                 max_slippage: get_env_f64("MAX_SLIPPAGE", 0.15)?,
             },
             guardrails: GuardrailsConfig {
-                max_concurrent_positions: get_env_usize("MAX_CONCURRENT_POSITIONS", 3)?,
-                max_advisor_positions: get_env_usize("MAX_ADVISOR_POSITIONS", 2)?,
+                max_concurrent_positions: get_env_usize("MAX_CONCURRENT_POSITIONS", 5)?,  // Increased from 3 for 1M+ MC hunting
+                max_advisor_positions: get_env_usize("MAX_ADVISOR_POSITIONS", 3)?,        // Increased from 2
                 rate_limit_ms: get_env_u64("RATE_LIMIT_MS", 100)?,
                 advisor_rate_limit_ms: get_env_u64("ADVISOR_RATE_LIMIT_MS", 30000)?,
-                loss_backoff_threshold: get_env_usize("LOSS_BACKOFF_THRESHOLD", 3)?,
+                loss_backoff_threshold: get_env_usize("LOSS_BACKOFF_THRESHOLD", 4)?,      // Increased from 3 ($100 positions)
                 loss_backoff_window_secs: get_env_u64("LOSS_BACKOFF_WINDOW_SECS", 180)?,
                 loss_backoff_pause_secs: get_env_u64("LOSS_BACKOFF_PAUSE_SECS", 120)?,
-                wallet_cooling_secs: get_env_u64("WALLET_COOLING_SECS", 90)?,
+                wallet_cooling_secs: get_env_u64("WALLET_COOLING_SECS", 60)?,             // Reduced from 90 for faster reuse
             },
             database: DatabaseConfig {
                 postgres_host: get_env_string("POSTGRES_HOST", "localhost")?,
@@ -186,6 +222,12 @@ impl Config {
                     .context("Invalid UDP_BIND_ADDRESS")?,
                 udp_recv_buffer_size: get_env_usize("UDP_RECV_BUFFER_SIZE", 8192)?,
                 udp_send_buffer_size: get_env_usize("UDP_SEND_BUFFER_SIZE", 8192)?,
+                yellowstone_endpoint: get_env_string("YELLOWSTONE_ENDPOINT", "http://127.0.0.1:10000")?,
+                yellowstone_token: env::var("YELLOWSTONE_TOKEN").ok(),
+                rpc_url: get_env_string("RPC_URL", "https://api.mainnet-beta.solana.com")?,
+                wallet_pubkey: get_env_string("WALLET_PUBKEY", "")?,
+                telegram_bot_token: get_env_string("TELEGRAM_BOT_TOKEN", "")?,
+                telegram_chat_id: get_env_string("TELEGRAM_CHAT_ID", "")?,
             },
             logging: LoggingConfig {
                 decision_log_path: PathBuf::from(get_env_string("DECISION_LOG_PATH", "./data/brain_decisions.csv")?),
@@ -198,6 +240,17 @@ impl Config {
             },
             performance: PerformanceConfig {
                 worker_threads: get_env_usize("WORKER_THREADS", 0)?,
+            },
+            confirmation: ConfirmationConfig {
+                pending_ttl_ms: get_env_u64("PENDING_TTL_MS", 1200)?,
+                fast_confirm_ttl_ms: get_env_u64("FAST_CONFIRM_TTL_MS", 600)?,
+                monitoring_interval_sec: get_env_u64("MONITORING_INTERVAL_SEC", 2)?,
+                reserve_buy_ttl_sec: get_env_u64("RESERVE_BUY_TTL_SEC", 30)?,
+                reserve_sell_ttl_sec: get_env_u64("RESERVE_SELL_TTL_SEC", 30)?,
+                confirm_timeout_buy_sec: get_env_u64("CONFIRM_TIMEOUT_BUY_SEC", 10)?,
+                confirm_timeout_sell_sec: get_env_u64("CONFIRM_TIMEOUT_SELL_SEC", 15)?,
+                reconciliation_interval_sec: get_env_u64("RECONCILIATION_INTERVAL_SEC", 30)?,
+                stale_state_threshold_sec: get_env_u64("STALE_STATE_THRESHOLD_SEC", 60)?,
             },
         })
     }
@@ -246,6 +299,21 @@ impl Config {
         }
         if self.network.advice_bus_port == self.network.decision_bus_port {
             anyhow::bail!("ADVICE_BUS_PORT and DECISION_BUS_PORT must be different");
+        }
+        if self.network.wallet_pubkey.is_empty() {
+            anyhow::bail!("WALLET_PUBKEY must be set for gRPC monitoring");
+        }
+        if self.network.yellowstone_endpoint.is_empty() {
+            anyhow::bail!("YELLOWSTONE_ENDPOINT must be set");
+        }
+        if self.network.rpc_url.is_empty() {
+            anyhow::bail!("RPC_URL must be set");
+        }
+        if self.network.telegram_bot_token.is_empty() {
+            log::warn!("TELEGRAM_BOT_TOKEN is empty - notifications will be disabled");
+        }
+        if self.network.telegram_chat_id.is_empty() {
+            log::warn!("TELEGRAM_CHAT_ID is empty - notifications will be disabled");
         }
 
         // Database

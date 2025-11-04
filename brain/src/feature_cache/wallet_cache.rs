@@ -232,7 +232,7 @@ impl WalletCache {
     }
     
     /// Update cache from SQLite database
-    async fn update_cache(&self) -> Result<usize> {
+    pub async fn update_cache(&self) -> Result<usize> {
         // Run DB query in blocking task to avoid blocking async runtime
         let db_path = self.db_path.clone();
         let features = tokio::task::spawn_blocking(move || {
@@ -271,24 +271,22 @@ impl WalletCache {
         
         let seven_days_ago = now - (7 * 24 * 60 * 60);
         
-        // Query wallet statistics (assuming a wallet_stats table exists)
-        // NOTE: Adjust table/column names based on actual schema
+        // Query wallet statistics from actual schema
         let mut stmt = conn.prepare(
             "SELECT 
-                wallet_address,
-                win_count_7d,
-                loss_count_7d,
-                realized_pnl_7d,
-                total_trades_7d,
-                avg_position_size_sol,
-                last_trade_mint,
-                last_trade_side,
-                last_trade_size_sol,
-                last_trade_timestamp
+                wallet,
+                realized_wins,
+                realized_losses,
+                net_pnl_sol,
+                total_trades,
+                is_tracked,
+                win_rate,
+                last_seen
              FROM wallet_stats
-             WHERE last_trade_timestamp > ?1
-               AND total_trades_7d > 0
-             ORDER BY realized_pnl_7d DESC
+             WHERE last_seen > ?1
+               AND total_trades > 0
+               AND is_tracked = 1
+             ORDER BY net_pnl_sol DESC
              LIMIT 1000"
         )?;
         
@@ -298,13 +296,9 @@ impl WalletCache {
             let losses: u32 = row.get(2)?;
             let pnl: f64 = row.get(3)?;
             let trade_count: u32 = row.get(4)?;
-            let avg_size: f64 = row.get(5)?;
-            
-            // Last trade fields (optional)
-            let last_mint_str: Option<String> = row.get(6).ok();
-            let last_side: Option<u8> = row.get(7).ok();
-            let last_size: Option<f64> = row.get(8).ok();
-            let last_ts: Option<u64> = row.get(9).ok();
+            let is_tracked: i32 = row.get(5)?;
+            let win_rate: f64 = row.get(6)?;
+            let last_seen: i64 = row.get(7)?;
             
             Ok((
                 wallet_str,
@@ -312,19 +306,15 @@ impl WalletCache {
                 losses,
                 pnl,
                 trade_count,
-                avg_size,
-                last_mint_str,
-                last_side,
-                last_size,
-                last_ts,
+                win_rate,
+                last_seen,
             ))
         })?;
         
         let mut features = Vec::new();
         
         for row_result in rows {
-            let (wallet_str, wins, losses, pnl, trade_count, avg_size, 
-                 last_mint_str, last_side, last_size, last_ts) = row_result?;
+            let (wallet_str, wins, losses, pnl, trade_count, win_rate, last_seen) = row_result?;
             
             // Parse wallet address
             let wallet = match Pubkey::from_str(&wallet_str) {
@@ -335,14 +325,7 @@ impl WalletCache {
                 }
             };
             
-            // Calculate win rate
-            let total_trades = wins + losses;
-            let win_rate = if total_trades > 0 {
-                wins as f64 / total_trades as f64
-            } else {
-                0.0
-            };
-            
+            // Use win_rate from database (already calculated)
             // Classify tier
             let tier = WalletFeatures::classify_tier(win_rate, pnl, trade_count);
             
@@ -352,17 +335,11 @@ impl WalletCache {
             // Calculate bootstrap score
             let bootstrap_score = WalletFeatures::calculate_bootstrap_score(wins, pnl);
             
-            // Parse last trade if available
-            let last_trade = if let (Some(mint_str), Some(side), Some(size), Some(ts)) = 
-                (last_mint_str, last_side, last_size, last_ts) {
-                Pubkey::from_str(&mint_str).ok().map(|mint| LastTrade {
-                    mint,
-                    side,
-                    size_sol: size,
-                    timestamp: ts,
-                })
+            // Calculate average size from total PnL and trades
+            let avg_size = if trade_count > 0 {
+                pnl.abs() / trade_count as f64
             } else {
-                None
+                0.0
             };
             
             let feature = WalletFeatures {
@@ -372,7 +349,7 @@ impl WalletCache {
                 avg_size,
                 tier,
                 confidence,
-                last_trade,
+                last_trade: None, // No last trade info in current schema
                 last_update: now,
                 bootstrap_score,
             };
@@ -385,10 +362,8 @@ impl WalletCache {
         Ok(features)
     }
 }
-
-#[cfg(test)]
 mod tests {
-    use super::*;
+    
     
     #[test]
     fn test_wallet_tier_classification() {

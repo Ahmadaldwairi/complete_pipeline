@@ -22,6 +22,7 @@ pub struct Config {
     // ============================================================================
     pub use_tpu: bool,
     pub use_jito: bool,
+    pub use_jito_race: bool,  // NEW: Race TPU vs Jito, take first confirmation
     
     // ============================================================================
     // JITO CONFIGURATION
@@ -34,15 +35,9 @@ pub struct Config {
     pub jito_exit_percentile: f64,
     
     // ============================================================================
-    // TELEGRAM NOTIFICATIONS (async, non-blocking)
-    // ============================================================================
-    pub telegram_bot_token: String,
-    pub telegram_chat_id: String,
-    pub telegram_async_queue: usize,
-    
-    // ============================================================================
     // ADVICE BUS (receives TradeDecisions from Brain)
     // ============================================================================
+    pub advice_bus_port: u16,
     pub advisor_enabled: bool,
     pub advisor_queue_size: usize,
     pub advice_only_mode: bool,
@@ -76,15 +71,17 @@ pub struct Config {
     pub retry_on_fail: bool,
     pub max_retries: u32,
     pub price_check_interval: u64,
+    
+    // ============================================================================
+    // CONFIRMATION TRACKING (3-state confirmation system)
+    // ============================================================================
+    pub confirmation_poll_intervals_ms: Vec<u64>,  // Exponential backoff intervals
+    pub max_confirmation_wait_ms: u64,             // Maximum wait before timeout
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Check required vars first
-        let _telegram_token = env::var("TELEGRAM_BOT_TOKEN")
-            .map_err(|_| "Missing TELEGRAM_BOT_TOKEN in .env")?;
-        let _telegram_chat = env::var("TELEGRAM_CHAT_ID")
-            .map_err(|_| "Missing TELEGRAM_CHAT_ID in .env")?;
         let _wallet_key = env::var("WALLET_PRIVATE_KEY")
             .map_err(|_| "Missing WALLET_PRIVATE_KEY in .env")?;
         let _db_host = env::var("DB_HOST")
@@ -117,6 +114,9 @@ impl Config {
             use_jito: env::var("USE_JITO")
                 .unwrap_or_else(|_| "false".to_string())
                 .parse()?,
+            use_jito_race: env::var("USE_JITO_RACE")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()?,
             
             // Jito
             jito_block_engine_url: env::var("JITO_BLOCK_ENGINE_URL")
@@ -136,14 +136,10 @@ impl Config {
                 .unwrap_or_else(|_| "50.0".to_string())
                 .parse()?,
             
-            // Telegram
-            telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN")?,
-            telegram_chat_id: env::var("TELEGRAM_CHAT_ID")?,
-            telegram_async_queue: env::var("TELEGRAM_ASYNC_QUEUE")
-                .unwrap_or_else(|_| "100".to_string())
-                .parse()?,
-            
             // Advice Bus
+            advice_bus_port: env::var("ADVICE_BUS_PORT")
+                .unwrap_or_else(|_| "45110".to_string())
+                .parse()?,
             advisor_enabled: env::var("ADVISOR_ENABLED")
                 .unwrap_or_else(|_| "true".to_string())
                 .parse()?,
@@ -195,6 +191,16 @@ impl Config {
                 .parse()?,
             price_check_interval: env::var("PRICE_CHECK_INTERVAL")
                 .unwrap_or_else(|_| "200".to_string())
+                .parse()?,
+            
+            // Confirmation Tracking
+            confirmation_poll_intervals_ms: env::var("CONFIRMATION_POLL_INTERVALS_MS")
+                .unwrap_or_else(|_| "100,200,400,800".to_string())
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect(),
+            max_confirmation_wait_ms: env::var("MAX_CONFIRMATION_WAIT_MS")
+                .unwrap_or_else(|_| "1200".to_string())
                 .parse()?,
         })
     }

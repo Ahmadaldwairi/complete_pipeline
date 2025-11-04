@@ -2,11 +2,10 @@ use anyhow::{anyhow, Result};
 use jito_sdk_rust::JitoJsonRpcSDK;
 use solana_sdk::{
     pubkey::Pubkey,
-    signature::{Keypair, Signer},
     transaction::Transaction,
 };
 use base64::{Engine as _, engine::general_purpose};
-use log::{info, debug, warn, error};
+use log::{info, debug, warn};
 use serde_json::json;
 use std::sync::Mutex as StdMutex;
 use std::time::{Instant, Duration};
@@ -157,16 +156,35 @@ impl JitoClient {
         &self,
         transaction: &Transaction,
     ) -> Result<String> {
-        info!("🚨 send_transaction_bundle() CALLED - starting bundle submission process");
+        // Delegate to multi-transaction version with single transaction
+        self.send_multi_transaction_bundle(&[transaction]).await
+    }
+    
+    /// Submit multiple transactions as a bundle to Jito
+    /// 
+    /// This allows atomic execution of multiple transactions (e.g., BUY+SELL)
+    /// All transactions execute atomically or none execute
+    /// 
+    /// Returns the bundle UUID for tracking
+    pub async fn send_multi_transaction_bundle(
+        &self,
+        transactions: &[&Transaction],
+    ) -> Result<String> {
+        info!("🚨 send_multi_transaction_bundle() CALLED - {} transactions", transactions.len());
         debug!("📦 Preparing bundle for submission...");
         
-        // Serialize transaction to base64
-        let serialized_tx = general_purpose::STANDARD.encode(
-            bincode::serialize(transaction)?
-        );
+        // Serialize all transactions to base64
+        let mut serialized_txs = Vec::new();
+        for (i, tx) in transactions.iter().enumerate() {
+            let serialized_tx = general_purpose::STANDARD.encode(
+                bincode::serialize(tx)?
+            );
+            debug!("   TX {}: {} bytes serialized", i + 1, serialized_tx.len());
+            serialized_txs.push(serialized_tx);
+        }
         
         // Prepare bundle (array of transactions)
-        let transactions = json!([serialized_tx]);
+        let transactions = json!(serialized_txs);
         
         // Create parameters with encoding specification
         let params = json!([

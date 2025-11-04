@@ -16,7 +16,8 @@
  */
 
 use prometheus::{
-    Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry,
+    Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry,
+    IntCounterVec,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -58,6 +59,7 @@ pub struct BrainMetrics {
     pub mint_cache_misses: IntCounter,
     pub wallet_cache_hits: IntCounter,
     pub wallet_cache_misses: IntCounter,
+    pub stale_cache_warnings: IntCounterVec,
     
     // Guardrail blocks
     pub guardrail_loss_backoff: IntCounter,
@@ -158,6 +160,12 @@ impl BrainMetrics {
         ).unwrap();
         registry.register(Box::new(wallet_cache_misses.clone())).unwrap();
         
+        let stale_cache_warnings = IntCounterVec::new(
+            Opts::new("brain_stale_cache_warnings", "Stale cache data warnings"),
+            &["cache_type"]
+        ).unwrap();
+        registry.register(Box::new(stale_cache_warnings.clone())).unwrap();
+        
         // Guardrail blocks
         let guardrail_loss_backoff = IntCounter::with_opts(
             Opts::new("brain_guardrail_loss_backoff", "Decisions blocked by loss backoff")
@@ -256,6 +264,7 @@ impl BrainMetrics {
             mint_cache_misses,
             wallet_cache_hits,
             wallet_cache_misses,
+            stale_cache_warnings,
             guardrail_loss_backoff,
             guardrail_position_limit,
             guardrail_rate_limit,
@@ -455,6 +464,31 @@ pub fn record_decision_sent() {
     m.udp_packets_sent.inc();
 }
 
+/// Record trade finalized (reached terminal state)
+pub fn record_trade_finalized() {
+    let m = metrics();
+    m.decisions_total.inc(); // Count as completed decision
+}
+
+/// Record position update from mempool
+pub fn record_position_update() {
+    // Using decisions_total as a proxy since we don't have a specific counter yet
+    // TODO: Add dedicated position_updates_total counter
+}
+
+/// Record a stale cache warning event
+pub fn record_stale_cache_warning(cache_type: &str) {
+    metrics().stale_cache_warnings
+        .with_label_values(&[cache_type])
+        .inc();
+}
+
+/// Record decision latency in milliseconds
+pub fn record_decision_latency(latency_ms: f64) {
+    // Convert ms to seconds for the histogram
+    metrics().decision_latency.observe(latency_ms / 1000.0);
+}
+
 /// Record UDP parse error
 pub fn record_udp_parse_error() {
     metrics().udp_parse_errors.inc();
@@ -516,6 +550,22 @@ impl DbQueryTimer {
     pub fn observe(self) {
         let duration = self.start.elapsed().as_secs_f64();
         metrics().db_query_duration.observe(duration);
+    }
+}
+
+/// Record a position being opened (after execution confirmation)
+pub fn record_position_opened() {
+    // Increment active positions counter
+    let current = metrics().active_positions.get();
+    metrics().active_positions.set(current + 1);
+}
+
+/// Record a position being closed (after execution confirmation)
+pub fn record_position_closed() {
+    // Decrement active positions counter
+    let current = metrics().active_positions.get();
+    if current > 0 {
+        metrics().active_positions.set(current - 1);
     }
 }
 

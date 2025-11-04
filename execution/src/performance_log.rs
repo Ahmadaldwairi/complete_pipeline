@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use log::{error, warn};
+use log::error;
 
 /// Complete performance metrics for a single trade execution
 #[derive(Debug, Clone, Serialize, Deserialize)]

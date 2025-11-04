@@ -74,6 +74,8 @@ pub struct Window {
     pub top1_share: f64,
     pub top3_share: f64,
     pub top5_share: f64,
+    pub price_volatility: f64,  // Standard deviation of price
+    pub open: f64,              // First price in window
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +102,8 @@ pub enum PumpEvent {
         amount_sol: u64,
         price: f64,
         is_amm: bool,
+        virtual_sol_reserves: u64,
+        virtual_token_reserves: u64,
     },
     Migrated {
         mint: String,

@@ -7,6 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{VecDeque, HashMap};
 use std::sync::{Arc, Mutex};
 use log::{info, warn, debug};
+use rusqlite::{Connection, OpenFlags};
+use anyhow::Result;
+use hex;
 
 /// Trade outcome for backoff tracking
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,6 +40,13 @@ struct RateLimitEntry {
     timestamp: u64,
 }
 
+/// Entry for creator trade tracking
+#[derive(Debug, Clone)]
+struct CreatorTradeEntry {
+    creator_wallet: [u8; 32],
+    timestamp: u64,
+}
+
 /// Configuration for guardrails
 #[derive(Debug, Clone)]
 pub struct GuardrailConfig {
@@ -56,6 +66,10 @@ pub struct GuardrailConfig {
     // Wallet cooling
     pub wallet_cooling_period_secs: u64, // Default: 90 (no copy same wallet twice in 90s)
     pub tier_a_bypass_cooling: bool,     // Default: true (Tier A can bypass if last was profitable)
+    
+    // Creator rate limiting
+    pub creator_trade_limit_window_secs: u64, // Default: 60 (1 minute window)
+    pub creator_trade_limit_count: usize,     // Default: 3 (max 3 trades per minute per creator)
 }
 
 impl Default for GuardrailConfig {
@@ -70,13 +84,17 @@ impl Default for GuardrailConfig {
             min_decision_interval_ms: 100,
             wallet_cooling_period_secs: 90,
             tier_a_bypass_cooling: true,
+            creator_trade_limit_window_secs: 60,
+            creator_trade_limit_count: 3,
         }
     }
 }
 
 /// Anti-churn guardrails system
+#[derive(Clone)]
 pub struct Guardrails {
     config: GuardrailConfig,
+    db_path: String,
     
     // Loss backoff tracking
     recent_losses: Arc<Mutex<VecDeque<LossEntry>>>,
@@ -92,16 +110,19 @@ pub struct Guardrails {
     
     // Wallet cooling
     wallet_copy_history: Arc<Mutex<VecDeque<WalletCopyEntry>>>,
+    
+    // Creator rate limiting (with persistence)
+    creator_trade_history: Arc<Mutex<VecDeque<CreatorTradeEntry>>>,
 }
 
 impl Guardrails {
     /// Create new guardrails system with default configuration
     pub fn new() -> Self {
-        Self::with_config(GuardrailConfig::default())
+        Self::with_config(GuardrailConfig::default(), "brain_guardrails.db".to_string())
     }
     
-    /// Create new guardrails system with custom configuration
-    pub fn with_config(config: GuardrailConfig) -> Self {
+    /// Create new guardrails system with custom configuration and database
+    pub fn with_config(config: GuardrailConfig, db_path: String) -> Self {
         info!("🛡️ Initializing anti-churn guardrails:");
         info!("   Loss backoff: {} losses in {}s → pause {}s", 
               config.loss_backoff_threshold, 
@@ -116,9 +137,14 @@ impl Guardrails {
         info!("   Wallet cooling: {}s (Tier A bypass: {})",
               config.wallet_cooling_period_secs,
               config.tier_a_bypass_cooling);
+        info!("   Creator rate limit: {} trades per {}s",
+              config.creator_trade_limit_count,
+              config.creator_trade_limit_window_secs);
+        info!("   Database: {}", db_path);
         
-        Self {
+        let guardrails = Self {
             config,
+            db_path: db_path.clone(),
             recent_losses: Arc::new(Mutex::new(VecDeque::new())),
             backoff_until: Arc::new(Mutex::new(None)),
             open_positions: Arc::new(Mutex::new(HashMap::new())),
@@ -126,7 +152,17 @@ impl Guardrails {
             last_decision: Arc::new(Mutex::new(None)),
             recent_entries: Arc::new(Mutex::new(VecDeque::new())),
             wallet_copy_history: Arc::new(Mutex::new(VecDeque::new())),
+            creator_trade_history: Arc::new(Mutex::new(VecDeque::new())),
+        };
+        
+        // Initialize database and load existing creator history
+        if let Err(e) = guardrails.init_database() {
+            warn!("⚠️  Failed to initialize guardrails database: {}", e);
+        } else if let Err(e) = guardrails.load_creator_history() {
+            warn!("⚠️  Failed to load creator history: {}", e);
         }
+        
+        guardrails
     }
     
     /// Check if a new decision is allowed
@@ -138,6 +174,7 @@ impl Guardrails {
         _mint: &[u8; 32],
         wallet: Option<&[u8; 32]>, // For copy trades
         wallet_tier: Option<u8>,   // For copy trades (0=C, 1=B, 2=A)
+        creator_wallet: Option<&[u8; 32]>, // Token creator wallet for rate limiting
     ) -> Result<(), String> {
         let now = Self::now_secs();
         
@@ -220,6 +257,31 @@ impl Guardrails {
             }
         }
         
+        // 5. Check creator trade rate limit
+        // Block spam from creators launching many tokens in quick succession
+        if let Some(creator_pubkey) = creator_wallet {
+            let mut creator_history = self.creator_trade_history.lock().unwrap();
+            
+            // Clean old entries (outside rate limit window)
+            creator_history.retain(|entry| 
+                now - entry.timestamp < self.config.creator_trade_limit_window_secs
+            );
+            
+            // Count trades from this creator in the window
+            let creator_trade_count = creator_history.iter()
+                .filter(|e| &e.creator_wallet == creator_pubkey)
+                .count();
+            
+            if creator_trade_count >= self.config.creator_trade_limit_count {
+                return Err(format!(
+                    "Creator rate limit: {} trades in last {}s (max {})",
+                    creator_trade_count,
+                    self.config.creator_trade_limit_window_secs,
+                    self.config.creator_trade_limit_count
+                ));
+            }
+        }
+        
         Ok(())
     }
     
@@ -229,13 +291,14 @@ impl Guardrails {
         trigger_type: u8,
         mint: &[u8; 32],
         wallet: Option<&[u8; 32]>,
+        creator_wallet: Option<&[u8; 32]>,
     ) {
         let now = Self::now_secs();
         
         let is_advisor = trigger_type == 2 || trigger_type == 3;
         
-        // Update position tracking
-        self.open_positions.lock().unwrap().insert(*mint, is_advisor);
+        // NOTE: Position tracking moved to ExecutionConfirmation handler
+        // Do NOT add to open_positions here - only track confirmed executions!
         
         // Update rate limit tracking
         *self.last_decision.lock().unwrap() = Some(now);
@@ -271,9 +334,163 @@ impl Guardrails {
             }
         }
         
+        // Record creator trade
+        if let Some(creator_pubkey) = creator_wallet {
+            let mut creator_history = self.creator_trade_history.lock().unwrap();
+            let entry = CreatorTradeEntry {
+                creator_wallet: *creator_pubkey,
+                timestamp: now,
+            };
+            creator_history.push_back(entry.clone());
+            
+            // Keep last 500 creator trades in memory
+            while creator_history.len() > 500 {
+                creator_history.pop_front();
+            }
+            
+            // Persist to database
+            if let Err(e) = self.save_creator_trade(&entry) {
+                warn!("⚠️  Failed to persist creator trade: {}", e);
+            }
+        }
+        
         debug!("📝 Recorded decision: trigger={}, mint={}...", 
                trigger_type, 
                hex::encode(&mint[..4]));
+    }
+    
+    /// Add a confirmed position to tracking (call when ExecutionConfirmation arrives)
+    pub fn add_confirmed_position(&self, mint: &[u8; 32], is_advisor: bool) {
+        self.open_positions.lock().unwrap().insert(*mint, is_advisor);
+        debug!("📊 Guardrails: Added confirmed position for {}...", hex::encode(&mint[..4]));
+    }
+    
+    /// Remove a confirmed position from tracking (call when SELL confirmation arrives)
+    pub fn remove_confirmed_position(&self, mint: &[u8; 32]) {
+        self.open_positions.lock().unwrap().remove(mint);
+        debug!("📊 Guardrails: Removed confirmed position for {}...", hex::encode(&mint[..4]));
+    }
+    
+    /// Initialize the SQLite database for creator trade persistence
+    fn init_database(&self) -> Result<()> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
+        
+        // Create creator_trades table if it doesn't exist
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS creator_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_wallet BLOB NOT NULL,
+                timestamp INTEGER NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        
+        // Create index for performance
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_creator_timestamp 
+             ON creator_trades(creator_wallet, timestamp)",
+            [],
+        )?;
+        
+        debug!("✅ Guardrails database initialized: {}", self.db_path);
+        Ok(())
+    }
+    
+    /// Load creator trade history from database
+    fn load_creator_history(&self) -> Result<()> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        
+        // Load trades from last 24 hours (much longer than rate limit window for safety)
+        let cutoff_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs() - (24 * 3600); // 24 hours ago
+        
+        let mut stmt = conn.prepare(
+            "SELECT creator_wallet, timestamp FROM creator_trades 
+             WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 1000"
+        )?;
+        
+        let mut creator_history = self.creator_trade_history.lock().unwrap();
+        creator_history.clear();
+        
+        let trade_iter = stmt.query_map([cutoff_time], |row| {
+            let creator_blob: Vec<u8> = row.get(0)?;
+            let timestamp: u64 = row.get(1)?;
+            
+            if creator_blob.len() == 32 {
+                let mut creator_wallet = [0u8; 32];
+                creator_wallet.copy_from_slice(&creator_blob);
+                
+                Ok(CreatorTradeEntry {
+                    creator_wallet,
+                    timestamp,
+                })
+            } else {
+                Err(rusqlite::Error::InvalidColumnType(0, "creator_wallet".to_string(), rusqlite::types::Type::Blob))
+            }
+        })?;
+        
+        let mut loaded_count = 0;
+        for trade_result in trade_iter {
+            match trade_result {
+                Ok(trade) => {
+                    creator_history.push_back(trade);
+                    loaded_count += 1;
+                }
+                Err(e) => {
+                    warn!("⚠️  Failed to parse creator trade: {}", e);
+                }
+            }
+        }
+        
+        info!("📚 Loaded {} creator trades from database", loaded_count);
+        Ok(())
+    }
+    
+    /// Save a single creator trade to database
+    fn save_creator_trade(&self, entry: &CreatorTradeEntry) -> Result<()> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        
+        conn.execute(
+            "INSERT INTO creator_trades (creator_wallet, timestamp) VALUES (?, ?)",
+            [&entry.creator_wallet[..], &entry.timestamp.to_be_bytes()[..]],
+        )?;
+        
+        Ok(())
+    }
+    
+    /// Cleanup old creator trades from database (run periodically)
+    pub fn cleanup_old_creator_trades(&self) -> Result<usize> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        
+        // Keep only last 7 days of trades
+        let cutoff_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs() - (7 * 24 * 3600); // 7 days ago
+        
+        let deleted = conn.execute(
+            "DELETE FROM creator_trades WHERE timestamp < ?",
+            [cutoff_time],
+        )?;
+        
+        if deleted > 0 {
+            debug!("🧹 Cleaned up {} old creator trades", deleted);
+        }
+        
+        Ok(deleted)
     }
     
     /// Record trade outcome (win/loss) for backoff tracking
@@ -422,21 +639,21 @@ mod tests {
             ..Default::default()
         };
         
-        let guardrails = Guardrails::with_config(config);
+        let guardrails = Guardrails::with_config(config, ":memory:".to_string());
         let mint1 = [1u8; 32];
         let mint2 = [2u8; 32];
         let mint3 = [3u8; 32];
         
         // Allow first position (rank-based)
-        assert!(guardrails.check_decision_allowed(0, &mint1, None, None).is_ok());
-        guardrails.record_decision(0, &mint1, None);
+        assert!(guardrails.check_decision_allowed(0, &mint1, None, None, None).is_ok());
+        guardrails.record_decision(0, &mint1, None, None);
         
         // Allow second position (advisor)
-        assert!(guardrails.check_decision_allowed(2, &mint2, None, None).is_ok());
-        guardrails.record_decision(2, &mint2, None);
+        assert!(guardrails.check_decision_allowed(2, &mint2, None, None, None).is_ok());
+        guardrails.record_decision(2, &mint2, None, None);
         
         // Block third position (max total reached)
-        assert!(guardrails.check_decision_allowed(0, &mint3, None, None).is_err());
+        assert!(guardrails.check_decision_allowed(0, &mint3, None, None, None).is_err());
     }
     
     #[test]
@@ -444,7 +661,7 @@ mod tests {
         let guardrails = Guardrails::new();
         let mint = [1u8; 32];
         
-        guardrails.record_decision(0, &mint, None);
+        guardrails.record_decision(0, &mint, None, None);
         assert_eq!(guardrails.stats().open_positions, 1);
         
         guardrails.record_outcome(&mint, TradeOutcome::Win, None);

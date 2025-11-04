@@ -1,0 +1,401 @@
+sol@ahmad-Z790-AORUS-ELITE-X-WIFI7:~/Desktop/solana-dev/Bots/scalper-bot/brain$ cd /home/sol/Desktop/solana-dev/Bots/scalper-bot/brain
+RUST_LOG=info ./target/release/decision_engine
+[2025-11-03T18:59:36Z INFO  decision_engine::metrics] 📊 Metrics system initialized
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Metrics: Initialized
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Metrics: Server started on port 9090
+[2025-11-03T18:59:36Z INFO  decision_engine::metrics] 📊 Starting metrics server on 0.0.0.0:9090
+[2025-11-03T18:59:36Z INFO  decision_engine::metrics] ✓ Metrics server listening on http://0.0.0.0:9090
+[2025-11-03T18:59:36Z INFO  decision_engine::metrics]   • Metrics endpoint: http://0.0.0.0:9090/metrics
+[2025-11-03T18:59:36Z INFO  decision_engine::metrics]   • Health endpoint: http://0.0.0.0:9090/health
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Configuration: Loaded
+
+======================================================================
+🧠 BRAIN SERVICE - TRADING DECISION ENGINE
+======================================================================
+⏰ 2025-11-03 13:59:36
+✅ All systems operational
+🛡️  Max positions: 1
+📊 Metrics: http://localhost:9090/metrics
+🔍 Status: LISTENING FOR ADVICE...
+======================================================================
+
+[2025-11-03T18:59:36Z INFO  decision_engine] 🔌 Connecting to databases...
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ SQLite: Connected (../data-mining/data/collector.db)
+[2025-11-03T18:59:36Z WARN  decision_engine] ⚠️  PostgreSQL not available: db error. Wallet cache will be empty.
+[2025-11-03T18:59:36Z WARN  decision_engine]    (This is OK for testing - only affects copy trade decisions)
+[2025-11-03T18:59:36Z INFO  decision_engine] 🗂️  Initializing feature caches...
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Caches: Initialized
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Cache updaters: Started (UDP real-time + 5s DB backup)
+[2025-11-03T18:59:36Z INFO  decision_engine] 🧠 Initializing decision engine...
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails] 🛡️ Initializing anti-churn guardrails:
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails]    Loss backoff: 3 losses in 180s → pause 120s
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails]    Position limits: 1 total, 2 advisor
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails]    Rate limits: advisor 30s, general 100ms
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails]    Wallet cooling: 90s (Tier A bypass: true)
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails]    Creator rate limit: 3 trades per 60s
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails]    Database: ../data-mining/data/collector.db
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::guardrails] 📚 Loaded 0 creator trades from database
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::logging] 📝 Opened existing decision log: "./data/brain_decisions.csv"
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Decision engine: Ready
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Position tracker: Initialized (max: 1)
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Trade state tracker: Initialized (BUY timeout=10s, SELL timeout=15s)
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Mint reservation manager: Initialized (TTL=30s)
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::position_sizer] 💰 Position Sizer initialized:
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::position_sizer]    Strategy: ConfidenceScaled { min_size_sol: 0.005, max_size_sol: 0.025 }
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::position_sizer]    Portfolio: 10 SOL
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::position_sizer]    Max position: 0.5 SOL (5.0%)
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::position_sizer]    Risk per trade: 2.0%
+[2025-11-03T18:59:36Z INFO  decision_engine::decision_engine::position_sizer]    Adaptive scaling: true (1.1x after 3 wins)
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Position sizer: Initialized (🧪 TESTING MODE - $1-$5 positions)
+[2025-11-03T18:59:36Z INFO  decision_engine] 📡 Setting up UDP communication...
+[2025-11-03T18:59:36Z INFO  decision_engine::udp_bus::receiver] 📻 Advice Bus receiver bound to 127.0.0.1:45100
+[2025-11-03T18:59:36Z INFO  decision_engine::udp_bus::sender] 📡 Decision Bus sender bound to 127.0.0.1:57141 → target 127.0.0.1:45110
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ UDP: Advice Bus (port 45100), Decision Bus (port 45110)
+[2025-11-03T18:59:36Z INFO  decision_engine] 🛡️ Replay protection: Initialized (capacity: 1000)
+[2025-11-03T18:59:36Z INFO  decision_engine] 🚀 Brain service started - Listening for advice...
+    
+[2025-11-03T18:59:36Z INFO  decision_engine::udp_bus::receiver] 🎧 Started listening for Advice Bus messages...
+[2025-11-03T18:59:36Z INFO  decision_engine::manual_exit_listener] 💰 ManualExit listener bound to 127.0.0.1:45135
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ ManualExit listener bound to 127.0.0.1:45135
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Hot Signal receiver bound to 127.0.0.1:45131 (mempool intelligence)
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ Execution confirmation receiver bound to 127.0.0.1:45115
+[2025-11-03T18:59:36Z INFO  decision_engine] 🔥 Listening for hot signals from mempool-watcher...
+[2025-11-03T18:59:36Z INFO  decision_engine] ✅ WindowMetrics listener bound to 127.0.0.1:45120
+[2025-11-03T18:59:36Z INFO  decision_engine] 🎧 Listening for execution confirmations...
+[2025-11-03T18:59:36Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T18:59:36Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T18:59:36Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T18:59:36Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.32 SOL, buyers=1, Δ286bps, alpha=0
+[2025-11-03T18:59:36Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=2.00 SOL, buyers=12, Δ-687bps, alpha=1
+[2025-11-03T18:59:36Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.98 SOL, buyers=2, Δ689bps, alpha=0
+[2025-11-03T18:59:36Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=1.18 SOL, buyers=3, Δ2187bps, alpha=0
+[2025-11-03T18:59:36Z INFO  decision_engine] 📊 WindowMetrics cached: UaZ26 | vol=3.00 SOL, buyers=1, Δ-1998bps, alpha=0
+[2025-11-03T18:59:37Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=3.81 SOL, buyers=4, Δ1070bps, alpha=0
+[2025-11-03T18:59:37Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.35 SOL, buyers=4, Δ-126bps, alpha=1
+[2025-11-03T18:59:37Z INFO  decision_engine] 📊 WindowMetrics cached: 2tNvFQ | vol=0.00 SOL, buyers=1, Δ0bps, alpha=0
+[2025-11-03T18:59:38Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.40 SOL, buyers=8, Δ-165bps, alpha=0
+[2025-11-03T18:59:38Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=1.57 SOL, buyers=2, Δ-285bps, alpha=0
+[2025-11-03T18:59:38Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.98 SOL, buyers=1, Δ726bps, alpha=0
+[2025-11-03T18:59:38Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:38Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=29.63 SOL, buyers=3, Δ9977bps, alpha=0
+[2025-11-03T18:59:38Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=1.43 SOL, buyers=1, Δ-588bps, alpha=0
+[2025-11-03T18:59:39Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=1.97 SOL, buyers=3, Δ-432bps, alpha=0
+[2025-11-03T18:59:39Z INFO  decision_engine] 📊 WindowMetrics cached: 2tNvFQ | vol=0.00 SOL, buyers=1, Δ1bps, alpha=0
+[2025-11-03T18:59:40Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=1.53 SOL, buyers=3, Δ287bps, alpha=0
+[2025-11-03T18:59:40Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.36 SOL, buyers=2, Δ-251bps, alpha=0
+[2025-11-03T18:59:40Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.00 SOL, buyers=1, Δ576bps, alpha=0
+[2025-11-03T18:59:40Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=1.38 SOL, buyers=1, Δ-341bps, alpha=0
+[2025-11-03T18:59:40Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=0.78 SOL, buyers=1, Δ3276bps, alpha=0
+[2025-11-03T18:59:41Z INFO  decision_engine] 📊 WindowMetrics cached: 6KJ97b | vol=7.02 SOL, buyers=3, Δ-2488bps, alpha=0
+[2025-11-03T18:59:41Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.39 SOL, buyers=4, Δ-169bps, alpha=0
+[2025-11-03T18:59:41Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=2.35 SOL, buyers=3, Δ-604bps, alpha=0
+[2025-11-03T18:59:41Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T18:59:41Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T18:59:41Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T18:59:41Z INFO  decision_engine::udp_bus::receiver] 🏆 RankOpportunity: mint=6d7f1623..., rank=60, score=50
+[2025-11-03T18:59:41Z INFO  decision_engine] 🏆 Rank opportunity: 6d7f1623 | rank: 60 | score: 50
+[2025-11-03T18:59:41Z INFO  decision_engine] 🔥 GOOD SCORE: mint=6d7f16237f1e | score=7.5/15.0 | rank=60 | conf=50
+[2025-11-03T18:59:41Z INFO  decision_engine] 🔒 Reserved 6d7f16237f1eb1a9 for 30s (trade_id: 8cfdfa96-905e-4dd2-9eab-3d88b61e901e)
+[2025-11-03T18:59:41Z INFO  decision_engine::trade_state] 🟡 6d7f16237f1e → BuyPending (trade_id: 8cfdfa96)
+[2025-11-03T18:59:41Z INFO  decision_engine] 📌 State: 6d7f16237f1eb1a9297c52680a8beb97e17f8a311a1f8b212fb3e293f6fc5722 → BuyPending (trade_id=8cfdfa96-905e-4dd2-9eab-3d88b61e901e)
+[2025-11-03T18:59:41Z INFO  decision_engine::udp_bus::sender] 🔍 BRAIN SENDING: side=BUY, mint=6d7f16237f1eb1a9..., size=15000000, conf=50 | RAW[34]=0 (side byte)
+[2025-11-03T18:59:41Z INFO  decision_engine] ✅ DECISION SENT: BUY 6d7f16237f1eb1a9 | size=0.0 SOL | conf=50 | score=7.5/15 | path=RankBased | hold=30s | slip=165bps | latency=0.0ms
+[2025-11-03T18:59:41Z WARN  decision_engine] ⚠️ Failed to parse execution confirmation: ExecutionConfirmation packet too short: 64 bytes
+[2025-11-03T18:59:41Z INFO  decision_engine] 📊 WindowMetrics cached: 6KJ97b | vol=7.08 SOL, buyers=4, Δ-2947bps, alpha=0
+[2025-11-03T18:59:41Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.26 SOL, buyers=3, Δ-250bps, alpha=0
+[2025-11-03T18:59:41Z INFO  decision_engine] ✅ BUY CONFIRMED: 8NRqRt5gDccL | size: 0.015 SOL | price: 0.00000004 SOL | tx: 111111111111
+[2025-11-03T18:59:41Z INFO  decision_engine::decision_engine::position_tracker] 📊 Opening position: 8NRqRt5g (0.015 SOL, conf=80)
+[2025-11-03T18:59:41Z INFO  decision_engine] 📊 Position added to tracker: 8NRqRt5gDccL (0.015 SOL)
+[2025-11-03T18:59:42Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=2.43 SOL, buyers=2, Δ125bps, alpha=0
+[2025-11-03T18:59:42Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.45 SOL, buyers=2, Δ-98bps, alpha=0
+[2025-11-03T18:59:42Z WARN  decision_engine] ⚠️ Failed to parse execution confirmation: Invalid message type: expected 2, got 26
+[2025-11-03T18:59:43Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=1.03 SOL, buyers=3, Δ451bps, alpha=0
+[2025-11-03T18:59:43Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.01 SOL, buyers=1, Δ-664bps, alpha=0
+[2025-11-03T18:59:43Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.01 SOL, buyers=1, Δ-68bps, alpha=0
+[2025-11-03T18:59:43Z INFO  decision_engine] 📊 WindowMetrics cached: 5qKsRD | vol=2.78 SOL, buyers=3, Δ-759bps, alpha=0
+[2025-11-03T18:59:43Z WARN  decision_engine] ⚠️ Failed to parse execution confirmation: ExecutionConfirmation packet too short: 65 bytes
+[2025-11-03T18:59:43Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:43Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:43Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=0.00 SOL, buyers=1, Δ1942bps, alpha=0
+[2025-11-03T18:59:43Z INFO  decision_engine] 📊 WindowMetrics cached: 5qKsRD | vol=3.75 SOL, buyers=4, Δ-1170bps, alpha=0
+[2025-11-03T18:59:44Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.01 SOL, buyers=2, Δ-22bps, alpha=0
+[2025-11-03T18:59:44Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.00 SOL, buyers=1, Δ564bps, alpha=0
+[2025-11-03T18:59:44Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=3.41 SOL, buyers=3, Δ676bps, alpha=0
+[2025-11-03T18:59:44Z INFO  decision_engine::udp_bus::receiver] 🎭 CopyTrade: wallet=4e77b028..., mint=b29160e2..., side=0, size=0.51 SOL, tier=2, conf=85
+[2025-11-03T18:59:44Z INFO  decision_engine] 📊 WindowMetrics cached: niE3o | vol=6.50 SOL, buyers=3, Δ3058bps, alpha=0
+[2025-11-03T18:59:44Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=1.13 SOL, buyers=2, Δ-295bps, alpha=0
+[2025-11-03T18:59:44Z INFO  decision_engine] 👥 Copy trade: b29160e2
+[2025-11-03T18:59:44Z INFO  decision_engine] 📊 Copy trade score: 19 (base=11, wallet_bonus=+8)
+[2025-11-03T18:59:45Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.04 SOL, buyers=3, Δ-14bps, alpha=0
+[2025-11-03T18:59:45Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.09 SOL, buyers=4, Δ404bps, alpha=0
+[2025-11-03T18:59:45Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=2.44 SOL, buyers=1, Δ2619bps, alpha=0
+[2025-11-03T18:59:45Z INFO  decision_engine] 📊 WindowMetrics cached: niE3o | vol=2.93 SOL, buyers=2, Δ4537bps, alpha=0
+[2025-11-03T18:59:46Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.01 SOL, buyers=1, Δ-571bps, alpha=0
+[2025-11-03T18:59:46Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.25 SOL, buyers=2, Δ465bps, alpha=0
+[2025-11-03T18:59:46Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=3.18 SOL, buyers=3, Δ1119bps, alpha=0
+[2025-11-03T18:59:46Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.32 SOL, buyers=2, Δ147bps, alpha=1
+[2025-11-03T18:59:46Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T18:59:46Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T18:59:46Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T18:59:46Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=10.55 SOL, buyers=4, Δ240bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.54 SOL, buyers=2, Δ146bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=2.68 SOL, buyers=8, Δ1602bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.12 SOL, buyers=2, Δ25bps, alpha=1
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: niE3o | vol=1.34 SOL, buyers=1, Δ1135bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=3.82 SOL, buyers=2, Δ1642bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.20 SOL, buyers=3, Δ40bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=58.91 SOL, buyers=7, Δ-8693bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.52 SOL, buyers=2, Δ1751bps, alpha=0
+[2025-11-03T18:59:47Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.27 SOL, buyers=2, Δ152bps, alpha=0
+[2025-11-03T18:59:48Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=0.65 SOL, buyers=3, Δ-8726bps, alpha=0
+[2025-11-03T18:59:48Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.10 SOL, buyers=1, Δ92bps, alpha=0
+[2025-11-03T18:59:48Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.05 SOL, buyers=1, Δ11bps, alpha=1
+[2025-11-03T18:59:48Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:48Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:48Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=1.95 SOL, buyers=1, Δ1793bps, alpha=0
+[2025-11-03T18:59:48Z INFO  decision_engine] 📊 WindowMetrics cached: 5cih9Z | vol=0.48 SOL, buyers=4, Δ-8757bps, alpha=0
+[2025-11-03T18:59:48Z INFO  decision_engine] 📊 WindowMetrics cached: niE3o | vol=0.00 SOL, buyers=1, Δ-906bps, alpha=0
+[2025-11-03T18:59:49Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.22 SOL, buyers=3, Δ18bps, alpha=0
+[2025-11-03T18:59:49Z INFO  decision_engine] 📊 WindowMetrics cached: 3QXRdZ | vol=0.00 SOL, buyers=1, Δ0bps, alpha=0
+[2025-11-03T18:59:49Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.20 SOL, buyers=1, Δ92bps, alpha=0
+[2025-11-03T18:59:50Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.22 SOL, buyers=2, Δ31bps, alpha=0
+[2025-11-03T18:59:50Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.10 SOL, buyers=1, Δ-2017bps, alpha=0
+[2025-11-03T18:59:51Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.19 SOL, buyers=2, Δ-71bps, alpha=0
+[2025-11-03T18:59:51Z INFO  decision_engine::udp_bus::receiver] 🏆 RankOpportunity: mint=aef26778..., rank=60, score=50
+[2025-11-03T18:59:51Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=2.15 SOL, buyers=3, Δ387bps, alpha=0
+[2025-11-03T18:59:51Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.51 SOL, buyers=3, Δ-95bps, alpha=0
+[2025-11-03T18:59:51Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T18:59:51Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T18:59:51Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T18:59:51Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.88 SOL, buyers=2, Δ-304bps, alpha=0
+[2025-11-03T18:59:52Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.70 SOL, buyers=2, Δ2042bps, alpha=0
+[2025-11-03T18:59:52Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.03 SOL, buyers=1, Δ-73bps, alpha=0
+[2025-11-03T18:59:52Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=4.59 SOL, buyers=5, Δ-2214bps, alpha=0
+[2025-11-03T18:59:53Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.28 SOL, buyers=3, Δ1697bps, alpha=0
+[2025-11-03T18:59:53Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.24 SOL, buyers=5, Δ-435bps, alpha=0
+[2025-11-03T18:59:53Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:53Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:54Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.69 SOL, buyers=1, Δ-679bps, alpha=0
+[2025-11-03T18:59:54Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.14 SOL, buyers=2, Δ-483bps, alpha=0
+[2025-11-03T18:59:54Z INFO  decision_engine] 📊 WindowMetrics cached: 6KJ97b | vol=1.39 SOL, buyers=2, Δ191bps, alpha=0
+[2025-11-03T18:59:54Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=2.93 SOL, buyers=4, Δ1276bps, alpha=0
+[2025-11-03T18:59:55Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.47 SOL, buyers=1, Δ187bps, alpha=0
+[2025-11-03T18:59:56Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.20 SOL, buyers=3, Δ-57bps, alpha=0
+[2025-11-03T18:59:56Z WARN  decision_engine::trade_state] ⏰ BUY timeout for 6d7f16237f1e (14s)
+[2025-11-03T18:59:56Z INFO  decision_engine::trade_state] ⚫ 6d7f16237f1e → Closed (trade_id: 8cfdfa96, reason: Timeout)
+[2025-11-03T18:59:56Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T18:59:56Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T18:59:56Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T18:59:56Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.34 SOL, buyers=1, Δ-177bps, alpha=0
+[2025-11-03T18:59:57Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.06 SOL, buyers=1, Δ363bps, alpha=0
+[2025-11-03T18:59:58Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=4.13 SOL, buyers=11, Δ-1954bps, alpha=0
+[2025-11-03T18:59:58Z INFO  decision_engine] 📊 WindowMetrics cached: niE3o | vol=1.12 SOL, buyers=3, Δ-367bps, alpha=0
+[2025-11-03T18:59:58Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:58Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T18:59:59Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.01 SOL, buyers=1, Δ-133bps, alpha=0
+[2025-11-03T19:00:00Z INFO  decision_engine] 📊 WindowMetrics cached: PrK8L | vol=5.00 SOL, buyers=3, Δ2205bps, alpha=0
+[2025-11-03T19:00:00Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.01 SOL, buyers=1, Δ-11bps, alpha=0
+[2025-11-03T19:00:00Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=2.60 SOL, buyers=3, Δ448bps, alpha=0
+[2025-11-03T19:00:00Z INFO  decision_engine] 📊 WindowMetrics cached: PrK8L | vol=7.96 SOL, buyers=9, Δ4432bps, alpha=0
+[2025-11-03T19:00:01Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=3.37 SOL, buyers=18, Δ1454bps, alpha=0
+[2025-11-03T19:00:01Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.11 SOL, buyers=2, Δ-56bps, alpha=0
+[2025-11-03T19:00:01Z INFO  decision_engine] 📊 WindowMetrics cached: 6mL6T | vol=3.01 SOL, buyers=3, Δ1670bps, alpha=0
+[2025-11-03T19:00:01Z INFO  decision_engine] 📊 WindowMetrics cached: PrK8L | vol=1.04 SOL, buyers=2, Δ4051bps, alpha=0
+[2025-11-03T19:00:01Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:01Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:01Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:01Z INFO  decision_engine::udp_bus::receiver] 🏆 RankOpportunity: mint=1ed527ae..., rank=60, score=40
+[2025-11-03T19:00:02Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=4.72 SOL, buyers=1, Δ-667bps, alpha=0
+[2025-11-03T19:00:03Z INFO  decision_engine] 📊 WindowMetrics cached: PrK8L | vol=0.29 SOL, buyers=2, Δ-400bps, alpha=0
+[2025-11-03T19:00:03Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=6.47 SOL, buyers=6, Δ-1292bps, alpha=0
+[2025-11-03T19:00:03Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:03Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:04Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=1.79 SOL, buyers=3, Δ-1567bps, alpha=0
+[2025-11-03T19:00:04Z INFO  decision_engine] 📊 WindowMetrics cached: PrK8L | vol=0.23 SOL, buyers=1, Δ-687bps, alpha=0
+[2025-11-03T19:00:04Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.05 SOL, buyers=1, Δ45bps, alpha=0
+[2025-11-03T19:00:04Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=2.52 SOL, buyers=13, Δ-870bps, alpha=0
+[2025-11-03T19:00:05Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.20 SOL, buyers=3, Δ56bps, alpha=0
+[2025-11-03T19:00:05Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=3.03 SOL, buyers=3, Δ-474bps, alpha=0
+[2025-11-03T19:00:05Z INFO  decision_engine] 📊 WindowMetrics cached: 3QXRdZ | vol=2.15 SOL, buyers=3, Δ-920bps, alpha=0
+[2025-11-03T19:00:06Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:06Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:06Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:07Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=2.76 SOL, buyers=3, Δ365bps, alpha=0
+[2025-11-03T19:00:07Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.98 SOL, buyers=1, Δ-30bps, alpha=0
+[2025-11-03T19:00:07Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.01 SOL, buyers=1, Δ-342bps, alpha=0
+[2025-11-03T19:00:08Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.15 SOL, buyers=2, Δ-47bps, alpha=0
+[2025-11-03T19:00:08Z INFO  decision_engine] 📊 WindowMetrics cached: PrK8L | vol=3.44 SOL, buyers=3, Δ-645bps, alpha=0
+[2025-11-03T19:00:08Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:08Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:09Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.45 SOL, buyers=3, Δ18bps, alpha=0
+[2025-11-03T19:00:09Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=1.40 SOL, buyers=2, Δ-66bps, alpha=0
+[2025-11-03T19:00:09Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=0.72 SOL, buyers=1, Δ1694bps, alpha=0
+[2025-11-03T19:00:09Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.59 SOL, buyers=3, Δ70bps, alpha=0
+[2025-11-03T19:00:09Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=2.68 SOL, buyers=4, Δ-1184bps, alpha=0
+[2025-11-03T19:00:10Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.01 SOL, buyers=3, Δ-916bps, alpha=0
+[2025-11-03T19:00:10Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.27 SOL, buyers=2, Δ139bps, alpha=0
+[2025-11-03T19:00:10Z INFO  decision_engine] 📊 WindowMetrics cached: 3bF5r | vol=3.04 SOL, buyers=3, Δ-680bps, alpha=0
+[2025-11-03T19:00:11Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=5.07 SOL, buyers=3, Δ2033bps, alpha=0
+[2025-11-03T19:00:11Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.26 SOL, buyers=2, Δ93bps, alpha=0
+[2025-11-03T19:00:11Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.32 SOL, buyers=2, Δ-67bps, alpha=0
+[2025-11-03T19:00:11Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=1.96 SOL, buyers=1, Δ473bps, alpha=0
+[2025-11-03T19:00:11Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:11Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:11Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:12Z INFO  decision_engine] 📊 WindowMetrics cached: 3bF5r | vol=0.01 SOL, buyers=1, Δ-755bps, alpha=0
+[2025-11-03T19:00:12Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.26 SOL, buyers=2, Δ216bps, alpha=0
+[2025-11-03T19:00:12Z INFO  decision_engine] 📊 WindowMetrics cached: PrK8L | vol=1.38 SOL, buyers=1, Δ-598bps, alpha=0
+[2025-11-03T19:00:12Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.99 SOL, buyers=2, Δ405bps, alpha=0
+[2025-11-03T19:00:13Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=2.36 SOL, buyers=1, Δ710bps, alpha=0
+[2025-11-03T19:00:13Z INFO  decision_engine::udp_bus::receiver] 🏆 RankOpportunity: mint=aef26778..., rank=60, score=50
+[2025-11-03T19:00:13Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:13Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:13Z INFO  decision_engine] 📊 WindowMetrics cached: 2fEPyY | vol=0.76 SOL, buyers=3, Δ-449bps, alpha=0
+[2025-11-03T19:00:13Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.19 SOL, buyers=2, Δ208bps, alpha=0
+[2025-11-03T19:00:13Z INFO  decision_engine] 📊 WindowMetrics cached: rBaRZ | vol=4.37 SOL, buyers=3, Δ1743bps, alpha=0
+[2025-11-03T19:00:13Z INFO  decision_engine] 📊 WindowMetrics cached: 2ntk5y | vol=2.01 SOL, buyers=2, Δ741bps, alpha=0
+[2025-11-03T19:00:13Z INFO  decision_engine] 📊 WindowMetrics cached: 49p8eo | vol=0.74 SOL, buyers=3, Δ-188bps, alpha=0
+[2025-11-03T19:00:14Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=14.98 SOL, buyers=3, Δ6834bps, alpha=0
+[2025-11-03T19:00:14Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.27 SOL, buyers=3, Δ272bps, alpha=0
+[2025-11-03T19:00:14Z INFO  decision_engine] 📊 WindowMetrics cached: rBaRZ | vol=8.31 SOL, buyers=5, Δ908bps, alpha=0
+[2025-11-03T19:00:15Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.11 SOL, buyers=2, Δ-20bps, alpha=0
+[2025-11-03T19:00:15Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=38.33 SOL, buyers=5, Δ381bps, alpha=0
+[2025-11-03T19:00:15Z INFO  decision_engine] 📊 WindowMetrics cached: 2ntk5y | vol=0.50 SOL, buyers=1, Δ877bps, alpha=0
+[2025-11-03T19:00:16Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=7.29 SOL, buyers=7, Δ-1818bps, alpha=0
+[2025-11-03T19:00:16Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.03 SOL, buyers=2, Δ263bps, alpha=0
+[2025-11-03T19:00:16Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:16Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:16Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=3.77 SOL, buyers=5, Δ1379bps, alpha=0
+[2025-11-03T19:00:16Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:17Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.98 SOL, buyers=3, Δ168bps, alpha=0
+[2025-11-03T19:00:17Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.20 SOL, buyers=1, Δ508bps, alpha=0
+[2025-11-03T19:00:17Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=6.27 SOL, buyers=8, Δ2345bps, alpha=0
+[2025-11-03T19:00:18Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=1.50 SOL, buyers=3, Δ278bps, alpha=0
+[2025-11-03T19:00:18Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=1.54 SOL, buyers=2, Δ-1119bps, alpha=0
+[2025-11-03T19:00:18Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.78 SOL, buyers=4, Δ815bps, alpha=0
+[2025-11-03T19:00:18Z INFO  decision_engine] 📊 WindowMetrics cached: 9oZFT | vol=0.29 SOL, buyers=3, Δ129bps, alpha=0
+[2025-11-03T19:00:18Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:18Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:19Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=8.48 SOL, buyers=9, Δ-4323bps, alpha=0
+[2025-11-03T19:00:19Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=2.31 SOL, buyers=2, Δ594bps, alpha=0
+[2025-11-03T19:00:19Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.16 SOL, buyers=2, Δ318bps, alpha=0
+[2025-11-03T19:00:19Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=0.99 SOL, buyers=3, Δ-3302bps, alpha=0
+[2025-11-03T19:00:20Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=1.77 SOL, buyers=3, Δ-751bps, alpha=0
+[2025-11-03T19:00:21Z INFO  decision_engine] 📊 WindowMetrics cached: ffmsQ | vol=2.63 SOL, buyers=3, Δ1304bps, alpha=0
+[2025-11-03T19:00:21Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=2.82 SOL, buyers=3, Δ-1140bps, alpha=0
+[2025-11-03T19:00:21Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:21Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:21Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:22Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=1.98 SOL, buyers=2, Δ-1520bps, alpha=0
+[2025-11-03T19:00:22Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=1.33 SOL, buyers=5, Δ-2052bps, alpha=0
+[2025-11-03T19:00:23Z INFO  decision_engine::udp_bus::receiver] 🏆 RankOpportunity: mint=b426d6da..., rank=60, score=50
+[2025-11-03T19:00:23Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:23Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:24Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.08 SOL, buyers=2, Δ34bps, alpha=0
+[2025-11-03T19:00:25Z INFO  decision_engine] 📊 WindowMetrics cached: 695ufc | vol=0.89 SOL, buyers=3, Δ-317bps, alpha=0
+[2025-11-03T19:00:25Z INFO  decision_engine] 📊 WindowMetrics cached: 2knjTZ | vol=3.38 SOL, buyers=3, Δ1159bps, alpha=0
+[2025-11-03T19:00:25Z INFO  decision_engine] 📊 WindowMetrics cached: 3djRBk | vol=3.67 SOL, buyers=3, Δ1325bps, alpha=0
+[2025-11-03T19:00:26Z INFO  decision_engine] 📊 WindowMetrics cached: 5Naxam | vol=5.00 SOL, buyers=3, Δ2205bps, alpha=0
+[2025-11-03T19:00:26Z INFO  decision_engine] 📊 WindowMetrics cached: 3djRBk | vol=2.46 SOL, buyers=1, Δ2260bps, alpha=0
+[2025-11-03T19:00:26Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:26Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:26Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:26Z INFO  decision_engine] 📊 WindowMetrics cached: 2coUjN | vol=3.48 SOL, buyers=3, Δ1275bps, alpha=0
+[2025-11-03T19:00:27Z INFO  decision_engine] 📊 WindowMetrics cached: 4wEKjD | vol=5.85 SOL, buyers=3, Δ2854bps, alpha=0
+[2025-11-03T19:00:27Z INFO  decision_engine] 📊 WindowMetrics cached: 6mL6T | vol=0.49 SOL, buyers=3, Δ74bps, alpha=0
+[2025-11-03T19:00:27Z INFO  decision_engine] 📊 WindowMetrics cached: 2coUjN | vol=2.23 SOL, buyers=1, Δ2647bps, alpha=0
+[2025-11-03T19:00:28Z INFO  decision_engine] 📊 WindowMetrics cached: 3djRBk | vol=1.89 SOL, buyers=1, Δ2693bps, alpha=0
+[2025-11-03T19:00:28Z INFO  decision_engine] 📊 WindowMetrics cached: 2knjTZ | vol=0.59 SOL, buyers=3, Δ1bps, alpha=0
+[2025-11-03T19:00:28Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=1.63 SOL, buyers=3, Δ-488bps, alpha=0
+[2025-11-03T19:00:28Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:28Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:28Z INFO  decision_engine] 📊 WindowMetrics cached: 2coUjN | vol=5.18 SOL, buyers=5, Δ4712bps, alpha=0
+[2025-11-03T19:00:28Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=1.33 SOL, buyers=1, Δ152bps, alpha=0
+[2025-11-03T19:00:29Z INFO  decision_engine] 📊 WindowMetrics cached: 2knjTZ | vol=0.77 SOL, buyers=5, Δ-106bps, alpha=0
+[2025-11-03T19:00:29Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.26 SOL, buyers=5, Δ-1579bps, alpha=0
+[2025-11-03T19:00:29Z INFO  decision_engine] 📊 WindowMetrics cached: 5Naxam | vol=3.12 SOL, buyers=3, Δ-1322bps, alpha=0
+[2025-11-03T19:00:29Z INFO  decision_engine] 📊 WindowMetrics cached: 6mL6T | vol=0.17 SOL, buyers=1, Δ36bps, alpha=0
+[2025-11-03T19:00:29Z INFO  decision_engine] 📊 WindowMetrics cached: 2coUjN | vol=2.84 SOL, buyers=2, Δ392bps, alpha=0
+[2025-11-03T19:00:29Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=1.96 SOL, buyers=2, Δ956bps, alpha=0
+[2025-11-03T19:00:29Z INFO  decision_engine] 📊 WindowMetrics cached: 3djRBk | vol=2.43 SOL, buyers=1, Δ-1927bps, alpha=0
+[2025-11-03T19:00:30Z INFO  decision_engine] 📊 WindowMetrics cached: 2knjTZ | vol=0.10 SOL, buyers=1, Δ-138bps, alpha=0
+[2025-11-03T19:00:30Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.83 SOL, buyers=4, Δ-1714bps, alpha=0
+[2025-11-03T19:00:30Z INFO  decision_engine] 📊 WindowMetrics cached: 2coUjN | vol=3.27 SOL, buyers=3, Δ-1698bps, alpha=0
+[2025-11-03T19:00:30Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.16 SOL, buyers=3, Δ-237bps, alpha=0
+[2025-11-03T19:00:30Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=0.21 SOL, buyers=9, Δ1077bps, alpha=0
+[2025-11-03T19:00:30Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.86 SOL, buyers=3, Δ-528bps, alpha=0
+[2025-11-03T19:00:31Z INFO  decision_engine] 📊 WindowMetrics cached: 3djRBk | vol=2.16 SOL, buyers=1, Δ-1419bps, alpha=0
+[2025-11-03T19:00:31Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.33 SOL, buyers=3, Δ-512bps, alpha=0
+[2025-11-03T19:00:31Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:31Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:31Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:31Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=0.21 SOL, buyers=1, Δ55bps, alpha=0
+[2025-11-03T19:00:32Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=0.06 SOL, buyers=1, Δ-58bps, alpha=0
+[2025-11-03T19:00:33Z INFO  decision_engine] 📊 WindowMetrics cached: 4EDWF6 | vol=0.10 SOL, buyers=1, Δ446bps, alpha=0
+[2025-11-03T19:00:33Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.32 SOL, buyers=1, Δ100bps, alpha=0
+[2025-11-03T19:00:33Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:33Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:34Z INFO  decision_engine] 📊 WindowMetrics cached: 2EupGn | vol=6.00 SOL, buyers=2, Δ0bps, alpha=0
+[2025-11-03T19:00:34Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=1.00 SOL, buyers=2, Δ139bps, alpha=0
+[2025-11-03T19:00:35Z INFO  decision_engine] 📊 WindowMetrics cached: 2EupGn | vol=3.29 SOL, buyers=2, Δ-820bps, alpha=0
+[2025-11-03T19:00:35Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.39 SOL, buyers=2, Δ-90bps, alpha=0
+[2025-11-03T19:00:36Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.78 SOL, buyers=3, Δ-307bps, alpha=0
+[2025-11-03T19:00:36Z INFO  decision_engine] 📊 WindowMetrics cached: SsjpY | vol=0.57 SOL, buyers=3, Δ-221bps, alpha=0
+[2025-11-03T19:00:36Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:36Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:36Z INFO  decision_engine] 📊 WindowMetrics cached: 4tzg9w | vol=0.91 SOL, buyers=3, Δ-393bps, alpha=0
+[2025-11-03T19:00:36Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:37Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.56 SOL, buyers=3, Δ-450bps, alpha=0
+[2025-11-03T19:00:37Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.19 SOL, buyers=1, Δ-121bps, alpha=0
+[2025-11-03T19:00:37Z INFO  decision_engine] 📊 WindowMetrics cached: SsjpY | vol=0.87 SOL, buyers=2, Δ-743bps, alpha=0
+[2025-11-03T19:00:37Z INFO  decision_engine] 📊 WindowMetrics cached: 4tzg9w | vol=0.10 SOL, buyers=1, Δ-499bps, alpha=0
+[2025-11-03T19:00:37Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=0.46 SOL, buyers=3, Δ-78bps, alpha=0
+[2025-11-03T19:00:38Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=0.47 SOL, buyers=3, Δ-250bps, alpha=0
+[2025-11-03T19:00:38Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:38Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:39Z INFO  decision_engine] 📊 WindowMetrics cached: 3fCgNc | vol=4.86 SOL, buyers=3, Δ2218bps, alpha=0
+[2025-11-03T19:00:39Z INFO  decision_engine] 📊 WindowMetrics cached: 5qKsRD | vol=1.02 SOL, buyers=3, Δ-322bps, alpha=0
+[2025-11-03T19:00:40Z INFO  decision_engine] 📊 WindowMetrics cached: 5qKsRD | vol=1.13 SOL, buyers=4, Δ-422bps, alpha=0
+[2025-11-03T19:00:40Z INFO  decision_engine] 📊 WindowMetrics cached: 3fCgNc | vol=0.60 SOL, buyers=1, Δ2833bps, alpha=0
+[2025-11-03T19:00:40Z INFO  decision_engine] 📊 WindowMetrics cached: 5qKsRD | vol=0.25 SOL, buyers=3, Δ-484bps, alpha=0
+[2025-11-03T19:00:41Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:41Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:41Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:42Z INFO  decision_engine] 📊 WindowMetrics cached: 3fCgNc | vol=3.45 SOL, buyers=2, Δ-1961bps, alpha=0
+[2025-11-03T19:00:43Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=1.84 SOL, buyers=2, Δ-1077bps, alpha=0
+[2025-11-03T19:00:43Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:43Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:44Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=0.08 SOL, buyers=4, Δ-594bps, alpha=0
+[2025-11-03T19:00:44Z INFO  decision_engine] 📊 WindowMetrics cached: 5c5pNm | vol=0.09 SOL, buyers=4, Δ-86bps, alpha=0
+[2025-11-03T19:00:45Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.34 SOL, buyers=3, Δ89bps, alpha=0
+[2025-11-03T19:00:45Z INFO  decision_engine] 📊 WindowMetrics cached: 3fCgNc | vol=1.64 SOL, buyers=2, Δ-965bps, alpha=0
+[2025-11-03T19:00:45Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=1.96 SOL, buyers=2, Δ832bps, alpha=0
+[2025-11-03T19:00:45Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.19 SOL, buyers=4, Δ126bps, alpha=0
+[2025-11-03T19:00:46Z INFO  decision_engine] 📊 WindowMetrics cached: 3oLLZY | vol=1.96 SOL, buyers=4, Δ812bps, alpha=0
+[2025-11-03T19:00:46Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:46Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:46Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:47Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.10 SOL, buyers=1, Δ392bps, alpha=0
+[2025-11-03T19:00:48Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=6.63 SOL, buyers=3, Δ-1198bps, alpha=0
+[2025-11-03T19:00:48Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=1.76 SOL, buyers=4, Δ905bps, alpha=0
+[2025-11-03T19:00:48Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:48Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:48Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=3.55 SOL, buyers=5, Δ-1429bps, alpha=0
+[2025-11-03T19:00:48Z INFO  decision_engine] 📊 WindowMetrics cached: 5ZjdN1 | vol=1.43 SOL, buyers=2, Δ-253bps, alpha=0
+[2025-11-03T19:00:49Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.24 SOL, buyers=1, Δ678bps, alpha=0
+[2025-11-03T19:00:50Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.39 SOL, buyers=2, Δ199bps, alpha=0
+[2025-11-03T19:00:51Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=1.06 SOL, buyers=2, Δ242bps, alpha=0
+[2025-11-03T19:00:51Z INFO  decision_engine::feature_cache::wallet_cache] 📊 Loaded 135 wallet features from database
+[2025-11-03T19:00:51Z INFO  decision_engine] 👥 Wallet cache updated: 135 entries
+[2025-11-03T19:00:51Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.40 SOL, buyers=3, Δ106bps, alpha=0
+[2025-11-03T19:00:51Z INFO  decision_engine] 📊 Mint cache updated: 0 entries
+[2025-11-03T19:00:52Z INFO  decision_engine] 📊 WindowMetrics cached: 76fjvo | vol=0.27 SOL, buyers=2, Δ145bps, alpha=0
+[2025-11-03T19:00:52Z INFO  decision_engine] 📊 WindowMetrics cached: g1Dvi | vol=0.25 SOL, buyers=1, Δ92bps, alpha=0
+[2025-11-03T19:00:52Z INFO  decision_engine] 📊 WindowMetrics cached: 4HbfsY | vol=2.13 SOL, buyers=3, Δ889bps, alpha=0
+[2025-11-03T19:00:53Z INFO  decision_engine::udp_bus::receiver] 🏆 RankOpportunity: mint=b426d6da..., rank=60, score=46
+[2025-11-03T19:00:53Z INFO  decision_engine] 📊 WindowMetrics cached: 4HbfsY | vol=2.24 SOL, buyers=5, Δ1184bps, alpha=0
+[2025-11-03T19:00:53Z INFO  decision_engine] 📊 WindowMetrics cached: 5UNGT1 | vol=0.11 SOL, buyers=1, Δ-11bps, alpha=0
+[2025-11-03T19:00:53Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+[2025-11-03T19:00:53Z ERROR decision_engine] ❌ Failed to deserialize hot signal: io error: 
+^C
+sol@ahmad-Z790-AORUS-ELITE-X-WIFI7:~/Desktop/solana-dev/Bots/scalper-bot/brain$  

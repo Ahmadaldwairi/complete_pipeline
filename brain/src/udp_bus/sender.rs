@@ -40,6 +40,28 @@ impl DecisionBusSender {
         })
     }
     
+    /// Validate TradeDecision for executor v1 compatibility
+    /// 
+    /// Ensures message format, protocol version, and data integrity meet v1 spec.
+    fn validate_v1_compatibility(&self, decision: &TradeDecision) -> bool {
+        match decision.validate_v1_format() {
+            Ok(()) => {
+                debug!(
+                    "✅ v1 compatibility validated: mint={}..., side={}, size={}, conf={}",
+                    hex::encode(&decision.mint[..4]),
+                    decision.side,
+                    decision.size_lamports,
+                    decision.confidence
+                );
+                true
+            }
+            Err(e) => {
+                error!("❌ v1 compatibility validation failed: {}", e);
+                false
+            }
+        }
+    }
+    
     /// Create with default target (127.0.0.1:45110)
     pub async fn new_default() -> Result<Self> {
         let target = "127.0.0.1:45110".parse()
@@ -52,8 +74,23 @@ impl DecisionBusSender {
     /// Non-blocking async send with error logging.
     /// Returns Ok(()) if sent successfully, Err if send failed.
     pub async fn send_decision(&self, decision: &TradeDecision) -> Result<()> {
+        // Pre-send v1 compatibility validation
+        if !self.validate_v1_compatibility(decision) {
+            anyhow::bail!("TradeDecision failed v1 compatibility validation");
+        }
+        
         // Serialize to bytes
         let bytes = decision.to_bytes();
+        
+        // DEBUG: Log raw bytes being sent
+        info!(
+            "🔍 BRAIN SENDING: side={}, mint={}..., size={}, conf={} | RAW[34]={} (side byte)",
+            if decision.side == 0 { "BUY" } else { "SELL" },
+            hex::encode(&decision.mint[..8]),
+            decision.size_lamports,
+            decision.confidence,
+            bytes[34]
+        );
         
         // Send packet
         match self.socket.send_to(&bytes, self.target_addr).await {
@@ -190,15 +227,12 @@ mod tests {
     use solana_sdk::pubkey::Pubkey;
     
     fn mock_decision() -> TradeDecision {
-        TradeDecision {
-            msg_type: 1,
-            mint: Pubkey::new_unique().to_bytes(),
-            side: 0,
-            size_lamports: 10_000_000_000,
-            slippage_bps: 150,
-            confidence: 75,
-            _padding: [0u8; 5],
-        }
+        TradeDecision::new_buy(
+            Pubkey::new_unique().to_bytes(),
+            10_000_000_000,
+            150,
+            75
+        )
     }
     
     #[tokio::test]
@@ -246,6 +280,52 @@ mod tests {
         let target = "127.0.0.1:45110".parse().unwrap();
         let batch_sender = DecisionBatchSender::new(target).await;
         assert!(batch_sender.is_ok(), "Batch sender should be created");
+    }
+
+    #[tokio::test]
+    async fn test_v1_compatibility_validation() {
+        let sender = DecisionBusSender::new_default().await.unwrap();
+        
+        // Valid decision should pass
+        let valid_decision = mock_decision();
+        assert!(sender.validate_v1_compatibility(&valid_decision), 
+                "Valid decision should pass v1 compatibility");
+        
+        // Test invalid protocol version
+        let mut invalid_decision = valid_decision;
+        invalid_decision.protocol_version = 99;
+        assert!(!sender.validate_v1_compatibility(&invalid_decision), 
+                "Invalid protocol version should fail");
+        
+        // Test invalid message type
+        let mut invalid_decision = valid_decision;
+        invalid_decision.msg_type = 99;
+        assert!(!sender.validate_v1_compatibility(&invalid_decision), 
+                "Invalid message type should fail");
+        
+        // Test invalid trade side
+        let mut invalid_decision = valid_decision;
+        invalid_decision.side = 99;
+        assert!(!sender.validate_v1_compatibility(&invalid_decision), 
+                "Invalid trade side should fail");
+        
+        // Test zero size
+        let mut invalid_decision = valid_decision;
+        invalid_decision.size_lamports = 0;
+        assert!(!sender.validate_v1_compatibility(&invalid_decision), 
+                "Zero size should fail");
+        
+        // Test excessive slippage
+        let mut invalid_decision = valid_decision;
+        invalid_decision.slippage_bps = 20000;
+        assert!(!sender.validate_v1_compatibility(&invalid_decision), 
+                "Excessive slippage should fail");
+        
+        // Test invalid confidence
+        let mut invalid_decision = valid_decision;
+        invalid_decision.confidence = 150;
+        assert!(!sender.validate_v1_compatibility(&invalid_decision), 
+                "Invalid confidence should fail");
     }
     
     // Note: Full send tests would require a listening socket
